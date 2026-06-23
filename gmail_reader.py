@@ -90,14 +90,24 @@ def _strip_html(html):
     return "\n".join(lines)
 
 
-def _detect_source(sender, body):
+def _detect_source(sender, subject, body):
     sender_l = (sender or "").lower()
-    # 1) match prioritaire par adresse d'expéditeur
+    subject_l = (subject or "").lower()
+
+    # Fotocasa et Habitaclia partagent l'expéditeur cliente@fotocasa.pro :
+    # on distingue via la fin du sujet "- De Fotocasa" / "- De habitaclia".
+    if "cliente@fotocasa.pro" in sender_l:
+        if "de habitaclia" in subject_l:
+            return "Habitaclia"
+        return "Fotocasa"
+
+    # Match par adresse d'expéditeur
     for addr, source in config.PORTAL_SENDERS.items():
         if addr.lower() in sender_l:
             return source
-    # 2) fallback par mots-clés / domaines
-    haystack = (sender_l + " " + body).lower()
+
+    # Fallback par mots-clés / domaines (sujet inclus)
+    haystack = (sender_l + " " + subject_l + " " + body).lower()
     for source, sigs in SOURCE_SIGNATURES.items():
         if any(sig in haystack for sig in sigs):
             return source
@@ -118,9 +128,11 @@ RE_NAME = re.compile(
 )
 
 
-# --- Parsing dédié Idealista -------------------------------------------------
+# --- Parsing des corps de mails ----------------------------------------------
 # Structure du corps : "...espera tu respuesta [NOM] [TÉL] [EMAIL] [MESSAGE]"
 RE_IDEALISTA_MARKER = re.compile(r"espera tu respuesta", re.I)
+# Référence dans le sujet Fotocasa/Habitaclia : "... con referencia 926287 - De ..."
+RE_SUBJECT_REF = re.compile(r"con referencia\s+([A-Za-z0-9\-]+)", re.I)
 # Suite de chiffres séparés par espaces, avec éventuel préfixe +/indicatif
 RE_PHONE_RUN = re.compile(r"\+?\d[\d\s]{6,}\d")
 
@@ -281,21 +293,30 @@ def fetch_new_leads(after_ts):
             body = _strip_html(raw_body) if "<" in raw_body else raw_body
             full = subject + "\n" + body
 
-            source = _detect_source(sender, full)
+            source = _detect_source(sender, subject, full)
             if not source:
                 continue
 
-            if source == "Idealista":
+            if source in ("Idealista", "Fotocasa", "Habitaclia"):
+                # Corps identique pour les 3 portails (nom/téléphone/email/message)
                 name, phone, email, message = _extract_idealista_lead(full)
                 urls = RE_URL.findall(full)
+
                 ref = ""
-                mref = RE_REF.search(full)
-                if mref:
-                    ref = mref.group(1).strip()
-                elif urls:
-                    mnum = RE_NUM_IN_URL.search(urls[0])
-                    if mnum:
-                        ref = mnum.group(1)
+                if source == "Idealista":
+                    mref = RE_REF.search(full)
+                    if mref:
+                        ref = mref.group(1).strip()
+                    elif urls:
+                        mnum = RE_NUM_IN_URL.search(urls[0])
+                        if mnum:
+                            ref = mnum.group(1)
+                else:
+                    # Fotocasa / Habitaclia : la référence est dans le sujet
+                    msref = RE_SUBJECT_REF.search(subject)
+                    if msref:
+                        ref = msref.group(1).strip()
+
                 lead = {
                     "nombre": name,
                     "telefono": phone,

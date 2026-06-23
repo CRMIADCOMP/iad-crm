@@ -38,13 +38,13 @@ DB_PATH = os.environ.get("DB_PATH", "crm.db")
 # Sources de leads à détecter
 LEAD_SOURCES = ["Idealista", "Fotocasa", "Habitaclia"]
 
-# Mapping adresse d'expéditeur -> source (détection fiable par expéditeur).
+# Mapping adresse d'expéditeur -> source (détection par défaut).
 # Sert aussi à construire le filtre "from:" de la requête Gmail.
-# Ajuste/complète ces adresses selon les expéditeurs réels reçus.
+# Note : Fotocasa ET Habitaclia arrivent depuis "cliente@fotocasa.pro" ;
+# la distinction se fait sur la fin du sujet ("- De Fotocasa" / "- De habitaclia").
 PORTAL_SENDERS = {
     "reply@idealista.com": "Idealista",
-    "noreply@fotocasa.es": "Fotocasa",
-    "noreply@habitaclia.com": "Habitaclia",
+    "cliente@fotocasa.pro": "Fotocasa",  # Fotocasa + Habitaclia (même expéditeur)
 }
 
 # ---------------------------------------------------------------------------
