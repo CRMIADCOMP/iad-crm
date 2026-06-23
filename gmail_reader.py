@@ -95,9 +95,10 @@ def _detect_source(sender, subject, body):
     subject_l = (subject or "").lower()
 
     # Fotocasa et Habitaclia partagent l'expéditeur cliente@fotocasa.pro :
-    # on distingue via la fin du sujet "- De Fotocasa" / "- De habitaclia".
+    # on distingue via le sujet OU le titre/corps du mail (selon le type).
     if "cliente@fotocasa.pro" in sender_l:
-        if "de habitaclia" in subject_l:
+        haystack = subject_l + " " + (body or "").lower()
+        if "habitaclia" in haystack:
             return "Habitaclia"
         return "Fotocasa"
 
@@ -206,6 +207,51 @@ def _extract_idealista_lead(text):
     return name.strip(), phone.strip(), email.strip(), message.strip()
 
 
+# --- Parsing Fotocasa / Habitaclia (3 types de mails) ------------------------
+def _label_value(text, label_pattern):
+    """Renvoie la valeur après 'label:' (jusqu'à la fin de la ligne)."""
+    m = re.search(label_pattern + r"\s*:\s*(.+)", text, re.I)
+    return m.group(1).strip() if m else ""
+
+
+def _extract_fotocasa_habitaclia(subject, full):
+    """
+    Gère les 3 types de mails Fotocasa/Habitaclia. Renvoie un dict
+    {nombre, telefono, email, message, ref}.
+    """
+    low = full.lower()
+
+    # Référence : sujet d'abord (TYPE 1), sinon corps (TYPE 3)
+    ref = ""
+    mref = RE_SUBJECT_REF.search(subject) or RE_SUBJECT_REF.search(full)
+    if mref:
+        ref = mref.group(1).strip()
+
+    # TYPE 2 — appel téléphonique
+    if "datos de la llamada" in low or "has recibido una llamada" in low:
+        phone = _clean_phone(_label_value(full, r"Tel[eé]fono"))
+        duracion = _label_value(full, r"Duraci[oó]n")
+        notas = ("Llamada recibida " + duracion).strip()
+        return {"nombre": "", "telefono": phone, "email": "", "message": notas, "ref": ref}
+
+    # TYPE 3 — contact structuré (labels Nombre/Teléfono/Email/Mensaje)
+    if "nuevo contacto de" in low or ("nombre:" in low and "email:" in low):
+        nombre = _label_value(full, r"Nombre")
+        phone = _clean_phone(_label_value(full, r"Tel[eé]fono"))
+        email_raw = _label_value(full, r"Email")
+        em = RE_EMAIL.search(email_raw)
+        email = em.group(0).strip() if em else email_raw.strip()
+        mensaje = _label_value(full, r"Mensaje")
+        if mensaje.strip().lower().startswith("no especificado") or not mensaje.strip():
+            mensaje = ""
+        return {"nombre": nombre.strip(), "telefono": phone, "email": email,
+                "message": mensaje.strip(), "ref": ref}
+
+    # TYPE 1 — message écrit (même structure qu'Idealista)
+    name, phone, email, message = _extract_idealista_lead(full)
+    return {"nombre": name, "telefono": phone, "email": email, "message": message, "ref": ref}
+
+
 def _clean_name(raw):
     if not raw:
         return ""
@@ -297,34 +343,30 @@ def fetch_new_leads(after_ts):
             if not source:
                 continue
 
-            if source in ("Idealista", "Fotocasa", "Habitaclia"):
-                # Corps identique pour les 3 portails (nom/téléphone/email/message)
+            if source == "Idealista":
                 name, phone, email, message = _extract_idealista_lead(full)
                 urls = RE_URL.findall(full)
-
                 ref = ""
-                if source == "Idealista":
-                    mref = RE_REF.search(full)
-                    if mref:
-                        ref = mref.group(1).strip()
-                    elif urls:
-                        mnum = RE_NUM_IN_URL.search(urls[0])
-                        if mnum:
-                            ref = mnum.group(1)
-                else:
-                    # Fotocasa / Habitaclia : la référence est dans le sujet
-                    msref = RE_SUBJECT_REF.search(subject)
-                    if msref:
-                        ref = msref.group(1).strip()
-
+                mref = RE_REF.search(full)
+                if mref:
+                    ref = mref.group(1).strip()
+                elif urls:
+                    mnum = RE_NUM_IN_URL.search(urls[0])
+                    if mnum:
+                        ref = mnum.group(1)
                 lead = {
-                    "nombre": name,
-                    "telefono": phone,
-                    "email": email,
-                    "fuente": source,
+                    "nombre": name, "telefono": phone, "email": email,
+                    "fuente": source, "url": urls[0].strip() if urls else "",
+                    "ref": ref, "message": message, "raw_excerpt": full[:500],
+                }
+            elif source in ("Fotocasa", "Habitaclia"):
+                info = _extract_fotocasa_habitaclia(subject, full)
+                urls = RE_URL.findall(full)
+                lead = {
+                    "nombre": info["nombre"], "telefono": info["telefono"],
+                    "email": info["email"], "fuente": source,
                     "url": urls[0].strip() if urls else "",
-                    "ref": ref,
-                    "message": message,
+                    "ref": info["ref"], "message": info["message"],
                     "raw_excerpt": full[:500],
                 }
             else:
