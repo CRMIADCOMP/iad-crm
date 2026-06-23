@@ -77,10 +77,17 @@ def _extract_body(payload):
 
 def _strip_html(html):
     html = re.sub(r"<(script|style)[^>]*>.*?</\1>", " ", html, flags=re.S | re.I)
+    # Convertit les balises de bloc en sauts de ligne pour préserver la structure
+    html = re.sub(r"(?i)<\s*br\s*/?>", "\n", html)
+    html = re.sub(r"(?i)</\s*(p|div|tr|li|h[1-6]|td|table)\s*>", "\n", html)
     text = re.sub(r"<[^>]+>", " ", html)
     text = re.sub(r"&nbsp;", " ", text)
     text = re.sub(r"&amp;", "&", text)
-    return re.sub(r"\s+", " ", text).strip()
+    text = re.sub(r"&#?\w+;", " ", text)
+    # Nettoie chaque ligne (espaces superflus) mais conserve les sauts de ligne
+    lines = [re.sub(r"[ \t]+", " ", ln).strip() for ln in text.splitlines()]
+    lines = [ln for ln in lines if ln]
+    return "\n".join(lines)
 
 
 def _detect_source(sender, body):
@@ -123,37 +130,66 @@ def _clean_phone(raw):
     return "".join(ch for ch in str(raw) if ch.isdigit())
 
 
+def _is_phone_line(line):
+    """Ligne composée uniquement d'un numéro (chiffres/espaces/+, sans lettres)."""
+    if any(ch.isalpha() for ch in line):
+        return False
+    return len(_clean_phone(line)) >= 7
+
+
 def _extract_idealista_lead(text):
     """
     Extrait (nombre, telefono, email, message) d'un mail Idealista.
-    Ordre attendu après 'espera tu respuesta' : nom, téléphone, email, message.
+    Structure (ligne par ligne) après 'espera tu respuesta' :
+        [NOM] / [TÉLÉPHONE] / [EMAIL] / [MESSAGE...]
     """
     m = RE_IDEALISTA_MARKER.search(text)
     segment = text[m.end():] if m else text
 
+    # Si le marqueur termine la ligne, on saute jusqu'à la ligne suivante
+    lines = [ln.strip() for ln in segment.splitlines()]
+    lines = [ln for ln in lines if ln]
+
     name = phone = email = message = ""
-    em = RE_EMAIL.search(segment)
-    if em:
-        email = em.group(0).strip()
-        before = segment[:em.start()]
-        message = segment[em.end():].strip()
-        # le téléphone est la dernière suite de chiffres avant l'email
-        runs = list(RE_PHONE_RUN.finditer(before))
-        if runs:
-            pm = runs[-1]
-            phone = _clean_phone(pm.group(0))
-            name = before[:pm.start()].strip()
-        else:
-            name = before.strip()
-    else:
+    email_idx = None
+
+    # Nom = première ligne qui n'est ni un téléphone ni un email
+    name_idx = None
+    for i, ln in enumerate(lines):
+        if RE_EMAIL.search(ln) or _is_phone_line(ln):
+            continue
+        name = ln
+        name_idx = i
+        break
+
+    # Téléphone = première ligne "téléphone" (après le nom si trouvé)
+    start = (name_idx + 1) if name_idx is not None else 0
+    for i in range(start, len(lines)):
+        if _is_phone_line(lines[i]):
+            phone = _clean_phone(lines[i])
+            break
+
+    # Email = première occurrence
+    for i, ln in enumerate(lines):
+        em = RE_EMAIL.search(ln)
+        if em:
+            email = em.group(0).strip()
+            email_idx = i
+            break
+
+    # Message = lignes après l'email
+    if email_idx is not None and email_idx + 1 < len(lines):
+        message = " ".join(lines[email_idx + 1:]).strip()
+
+    # Repli si structure inattendue (tout sur une ligne)
+    if not phone:
         runs = list(RE_PHONE_RUN.finditer(segment))
         if runs:
-            pm = runs[0]
-            phone = _clean_phone(pm.group(0))
-            name = segment[:pm.start()].strip()
-            message = segment[pm.end():].strip()
-        else:
-            name = segment.strip()
+            phone = _clean_phone(runs[-1].group(0))
+    if not email:
+        em = RE_EMAIL.search(segment)
+        if em:
+            email = em.group(0).strip()
 
     return name.strip(), phone.strip(), email.strip(), message.strip()
 

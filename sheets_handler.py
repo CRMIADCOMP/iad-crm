@@ -52,6 +52,34 @@ def _ref_norm(value):
     return "".join(ch for ch in str(value).lower() if ch.isalnum())
 
 
+_config_logged = False
+
+
+def _log_config_refs(rows):
+    """Affiche une fois toutes les refs/URLs de l'onglet Config (debug matching)."""
+    global _config_logged
+    if _config_logged:
+        return
+    _config_logged = True
+    cc = config.CONFIG_COL
+    print("[config] === Refs disponibles dans l'onglet Config ===")
+    for row in rows:
+        def cell(idx):
+            return row[idx] if idx < len(row) else ""
+        feuille = cell(cc["feuille"]).strip()
+        if not feuille:
+            continue
+        refs = {
+            "idealista": cell(cc["ref_idealista"]).strip(),
+            "fotocasa": cell(cc["ref_fotocasa"]).strip(),
+            "habitaclia": cell(cc["ref_habitaclia"]).strip(),
+            "iad": cell(cc["ref_iad"]).strip(),
+        }
+        refs_norm = {k: _ref_norm(v) for k, v in refs.items() if v}
+        print(f"[config]   feuille='{feuille}' refs={refs} (norm={refs_norm})")
+    print("[config] === fin ===")
+
+
 def match_lead_to_sheet(lead):
     """
     Cherche dans l'onglet Config la feuille correspondant au lead,
@@ -62,7 +90,12 @@ def match_lead_to_sheet(lead):
     lead_url = (lead.get("url") or "").lower()
     lead_ref = _ref_norm(lead.get("ref", ""))
 
-    for row in load_config_rows():
+    rows = load_config_rows()
+    _log_config_refs(rows)
+    print(f"[match] lead {lead.get('fuente')} -> ref='{lead.get('ref','')}' "
+          f"(norm='{lead_ref}') url='{lead_url}'")
+
+    for row in rows:
         def cell(idx):
             return row[idx] if idx < len(row) else ""
 
@@ -80,14 +113,17 @@ def match_lead_to_sheet(lead):
             for u in urls:
                 u = u.strip().lower()
                 if u and (u in lead_url or lead_url in u):
+                    print(f"[match]   ✅ match URL -> feuille='{feuille}'")
                     return feuille, cell(cc["url_iad"]).strip()
 
         # match par référence
         if lead_ref:
             for r in refs:
                 if r and _ref_norm(r) == lead_ref:
+                    print(f"[match]   ✅ match REF -> feuille='{feuille}'")
                     return feuille, cell(cc["url_iad"]).strip()
 
+    print(f"[match]   ❌ aucun match pour ref='{lead_ref}' url='{lead_url}'")
     return None, None
 
 
