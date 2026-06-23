@@ -111,6 +111,53 @@ RE_NAME = re.compile(
 )
 
 
+# --- Parsing dédié Idealista -------------------------------------------------
+# Structure du corps : "...espera tu respuesta [NOM] [TÉL] [EMAIL] [MESSAGE]"
+RE_IDEALISTA_MARKER = re.compile(r"espera tu respuesta", re.I)
+# Suite de chiffres séparés par espaces, avec éventuel préfixe +/indicatif
+RE_PHONE_RUN = re.compile(r"\+?\d[\d\s]{6,}\d")
+
+
+def _clean_phone(raw):
+    """Supprime espaces et '+' — ne garde que les chiffres."""
+    return "".join(ch for ch in str(raw) if ch.isdigit())
+
+
+def _extract_idealista_lead(text):
+    """
+    Extrait (nombre, telefono, email, message) d'un mail Idealista.
+    Ordre attendu après 'espera tu respuesta' : nom, téléphone, email, message.
+    """
+    m = RE_IDEALISTA_MARKER.search(text)
+    segment = text[m.end():] if m else text
+
+    name = phone = email = message = ""
+    em = RE_EMAIL.search(segment)
+    if em:
+        email = em.group(0).strip()
+        before = segment[:em.start()]
+        message = segment[em.end():].strip()
+        # le téléphone est la dernière suite de chiffres avant l'email
+        runs = list(RE_PHONE_RUN.finditer(before))
+        if runs:
+            pm = runs[-1]
+            phone = _clean_phone(pm.group(0))
+            name = before[:pm.start()].strip()
+        else:
+            name = before.strip()
+    else:
+        runs = list(RE_PHONE_RUN.finditer(segment))
+        if runs:
+            pm = runs[0]
+            phone = _clean_phone(pm.group(0))
+            name = segment[:pm.start()].strip()
+            message = segment[pm.end():].strip()
+        else:
+            name = segment.strip()
+
+    return name.strip(), phone.strip(), email.strip(), message.strip()
+
+
 def _clean_name(raw):
     if not raw:
         return ""
@@ -200,13 +247,48 @@ def fetch_new_leads(after_ts):
             if not source:
                 continue
 
-            lead = _extract_lead(source, full, sender)
+            if source == "Idealista":
+                name, phone, email, message = _extract_idealista_lead(full)
+                urls = RE_URL.findall(full)
+                ref = ""
+                mref = RE_REF.search(full)
+                if mref:
+                    ref = mref.group(1).strip()
+                elif urls:
+                    mnum = RE_NUM_IN_URL.search(urls[0])
+                    if mnum:
+                        ref = mnum.group(1)
+                lead = {
+                    "nombre": name,
+                    "telefono": phone,
+                    "email": email,
+                    "fuente": source,
+                    "url": urls[0].strip() if urls else "",
+                    "ref": ref,
+                    "message": message,
+                    "raw_excerpt": full[:500],
+                }
+            else:
+                lead = _extract_lead(source, full, sender)
+                lead["message"] = ""
+
             lead["gmail_id"] = mid
             lead["received_at"] = internal_ts
             lead["subject"] = subject
+
+            # Logs détaillés pour vérification du parsing
+            print(
+                f"[gmail] lead {source} | nombre='{lead['nombre']}' "
+                f"telefono='{lead['telefono']}' email='{lead['email']}' "
+                f"ref='{lead.get('ref','')}' url='{lead.get('url','')}'"
+            )
+            print(f"[gmail]   message='{(lead.get('message') or '')[:160]}'")
+
             # On ne garde que les leads ayant au moins un téléphone OU un email
             if lead["telefono"] or lead["email"]:
                 leads.append(lead)
+            else:
+                print(f"[gmail]   ignoré (ni téléphone ni email) — subject='{subject}'")
 
         page_token = resp.get("nextPageToken")
         if not page_token:

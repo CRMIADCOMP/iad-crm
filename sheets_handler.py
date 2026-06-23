@@ -94,6 +94,17 @@ def match_lead_to_sheet(lead):
 # ---------------------------------------------------------------------------
 # Feuilles prospects
 # ---------------------------------------------------------------------------
+def get_iad_url_for_sheet(feuille):
+    """Renvoie l'URL IAD (col I de Config) associée à une feuille, pour les relances."""
+    cc = config.CONFIG_COL
+    for row in load_config_rows():
+        def cell(idx):
+            return row[idx] if idx < len(row) else ""
+        if cell(cc["feuille"]).strip() == feuille:
+            return cell(cc["url_iad"]).strip()
+    return ""
+
+
 def _get_or_create_worksheet(name):
     ss = _get_spreadsheet()
     try:
@@ -138,14 +149,21 @@ def upsert_prospect(feuille, lead):
     today = datetime.date.today().isoformat()
     nombre = lead.get("nombre") or ""
 
+    # Nettoyage : aucune donnée copiée avec des espaces superflus
+    nombre = nombre.strip()
+    telefono = (lead.get("telefono", "") or "").strip()
+    email = (lead.get("email", "") or "").strip()
+    fuente = (lead.get("fuente", "") or "").strip()
+    # Notas stocke le message du prospect
+    notas = (lead.get("message") or lead.get("subject") or "").strip()
+
     if row_idx is None:
         new_row = [""] * len(config.PROSPECT_HEADERS)
         new_row[config.COL["nombre"] - 1] = nombre
-        new_row[config.COL["telefono"] - 1] = lead.get("telefono", "")
-        new_row[config.COL["email"] - 1] = lead.get("email", "")
-        new_row[config.COL["fuente"] - 1] = lead.get("fuente", "")
-        # Notas stocke l'URL de l'annonce (réutilisée pour les relances)
-        new_row[config.COL["notas"] - 1] = lead.get("url", "") or lead.get("subject", "")
+        new_row[config.COL["telefono"] - 1] = telefono
+        new_row[config.COL["email"] - 1] = email
+        new_row[config.COL["fuente"] - 1] = fuente
+        new_row[config.COL["notas"] - 1] = notas
         new_row[config.COL["fecha_contacto"] - 1] = today
         new_row[config.COL["estado_final"] - 1] = "Nuevo contacto"
         ws.append_row(new_row, value_input_option="USER_ENTERED")
@@ -154,13 +172,19 @@ def upsert_prospect(feuille, lead):
         return len(all_vals), True, new_row
 
     # mise à jour : complète les champs manquants seulement
+    def _existing(col_name):
+        idx = config.COL[col_name] - 1
+        return (existing[idx] if len(existing) > idx else "").strip()
+
     updates = {}
-    if nombre and not (existing[config.COL["nombre"] - 1] if len(existing) >= config.COL["nombre"] else ""):
+    if nombre and not _existing("nombre"):
         updates[config.COL["nombre"]] = nombre
-    if lead.get("email") and not (existing[config.COL["email"] - 1] if len(existing) >= config.COL["email"] else ""):
-        updates[config.COL["email"]] = lead["email"]
-    if lead.get("telefono") and not (existing[config.COL["telefono"] - 1] if len(existing) >= config.COL["telefono"] else ""):
-        updates[config.COL["telefono"]] = lead["telefono"]
+    if email and not _existing("email"):
+        updates[config.COL["email"]] = email
+    if telefono and not _existing("telefono"):
+        updates[config.COL["telefono"]] = telefono
+    if notas and not _existing("notas"):
+        updates[config.COL["notas"]] = notas
     for col, val in updates.items():
         ws.update_cell(row_idx, col, val)
     return row_idx, False, existing

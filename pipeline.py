@@ -13,7 +13,6 @@ Orchestration du pipeline CRM (exécuté à 8h, 12h, 18h heure Madrid).
  13   Clôture "Sin respuesta - 7d" après 7 jours
  14   Rapport par email
 """
-import re
 import time
 import datetime
 import traceback
@@ -24,8 +23,6 @@ import gmail_reader
 import sheets_handler as sheets
 import whatsapp
 import ai_analyzer
-
-RE_URL = re.compile(r"https?://[^\s]+")
 
 
 def _today():
@@ -214,10 +211,8 @@ def process_relances_and_closures(stats):
 
                 # Relance J+2 (une seule fois)
                 if days >= config.RELANCE_DELAY_DAYS and not (p.get("relance_j2") or "").strip():
-                    url = ""
-                    m = RE_URL.search(p.get("notas", "") or "")
-                    if m:
-                        url = m.group(0)
+                    # URL de l'annonce relue depuis l'onglet Config (Notas contient le message)
+                    url = sheets.get_iad_url_for_sheet(feuille)
                     body = whatsapp.build_relance(p.get("nombre", ""), url)
                     ok, info = whatsapp.send_message(phone, body)
                     if ok:
