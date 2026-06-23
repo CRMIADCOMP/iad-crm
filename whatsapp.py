@@ -56,13 +56,28 @@ def build_long_search(nombre):
 
 
 # ---------------------------------------------------------------------------
+# Normalisation du numéro pour l'envoi (sans modifier ce qui est stocké)
+# ---------------------------------------------------------------------------
+def to_dialable(phone):
+    """
+    Prépare un numéro pour UltraMsg : ajoute l'indicatif Espagne (34) aux
+    numéros à 9 chiffres commençant par 6/7/9. Les numéros déjà avec indicatif
+    sont laissés tels quels.
+    """
+    digits = normalize_phone(phone)
+    if len(digits) == 9 and digits[0] in "679":
+        return "34" + digits
+    return digits
+
+
+# ---------------------------------------------------------------------------
 # Envoi UltraMsg
 # ---------------------------------------------------------------------------
 def send_message(phone, body):
     """
     Envoie un message WhatsApp individuel. Renvoie (ok: bool, info: str).
     """
-    phone_n = normalize_phone(phone)
+    phone_n = to_dialable(phone)
     if not phone_n:
         return False, "numéro vide/invalide"
 
