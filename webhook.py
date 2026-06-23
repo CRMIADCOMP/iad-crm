@@ -30,16 +30,26 @@ def ultramsg_webhook():
     if event_type and "message" not in event_type.lower():
         return jsonify({"status": "ignored_event", "event": event_type}), 200
 
-    phone = data.get("from") or data.get("author") or data.get("chatId") or ""
+    from_id = data.get("from") or data.get("author") or data.get("chatId") or ""
     body = data.get("body") or data.get("text") or ""
     msg_type = data.get("type", "")
 
-    # On ne stocke que les messages texte/chat avec un numéro
-    if not phone:
+    # Log du from_id brut pour vérifier le format exact envoyé par UltraMsg
+    print(f"[webhook] from_id reçu: '{from_id}' (type={msg_type})")
+
+    if not from_id:
         return jsonify({"status": "no_phone"}), 200
 
+    # Ignore les messages de groupe (@g.us) ; ne traite que les conversations individuelles (@c.us)
+    if "@g.us" in from_id:
+        print(f"[webhook] message de groupe ignoré: {from_id}")
+        return jsonify({"status": "ignored_group"}), 200
+    if "@c.us" not in from_id:
+        print(f"[webhook] from_id non individuel ignoré: {from_id}")
+        return jsonify({"status": "ignored_non_individual"}), 200
+
     db.init_db()
-    msg_id = db.save_incoming_message(phone=phone, body=body, raw=payload)
-    print(f"[webhook] réponse reçue de {phone} (type={msg_type}) id={msg_id}: {body[:80]}")
+    msg_id = db.save_incoming_message(phone=from_id, body=body, raw=payload)
+    print(f"[webhook] réponse reçue de {from_id} (type={msg_type}) id={msg_id}: {body[:80]}")
 
     return jsonify({"status": "saved", "id": msg_id}), 200
