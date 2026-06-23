@@ -249,9 +249,11 @@ def fetch_new_leads(after_ts):
     (timestamp Unix). Filtre sur les sources Idealista/Fotocasa/Habitaclia.
     """
     service = _get_service()
-    # Gmail query : emails reçus après la date (granularité jour) -> on refiltre par timestamp.
-    after_date = datetime.datetime.fromtimestamp(max(after_ts - 86400, 0))
-    query = f"after:{after_date.strftime('%Y/%m/%d')}"
+    # Boîte de réception uniquement + dernières 24h + expéditeurs connus.
+    # On refiltre ensuite par timestamp (internalDate) pour ne traiter que le nouveau.
+    senders = " OR ".join(config.PORTAL_SENDERS.keys())
+    query = f"label:INBOX newer_than:1d from:({senders})"
+    print(f"[gmail] requête: {query}")
 
     leads = []
     seen_ids = set()
