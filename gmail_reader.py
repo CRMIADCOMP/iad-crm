@@ -84,7 +84,13 @@ def _strip_html(html):
 
 
 def _detect_source(sender, body):
-    haystack = (sender + " " + body).lower()
+    sender_l = (sender or "").lower()
+    # 1) match prioritaire par adresse d'expéditeur
+    for addr, source in config.PORTAL_SENDERS.items():
+        if addr.lower() in sender_l:
+            return source
+    # 2) fallback par mots-clés / domaines
+    haystack = (sender_l + " " + body).lower()
     for source, sigs in SOURCE_SIGNATURES.items():
         if any(sig in haystack for sig in sigs):
             return source

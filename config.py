@@ -38,6 +38,11 @@ DB_PATH = os.environ.get("DB_PATH", "crm.db")
 # Sources de leads à détecter
 LEAD_SOURCES = ["Idealista", "Fotocasa", "Habitaclia"]
 
+# Mapping adresse d'expéditeur -> source (détection fiable par expéditeur)
+PORTAL_SENDERS = {
+    "reply@idealista.com": "Idealista",
+}
+
 # ---------------------------------------------------------------------------
 # Colonnes des feuilles "prospects" (index 1 = colonne A)
 # ---------------------------------------------------------------------------
