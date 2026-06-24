@@ -340,10 +340,12 @@ def fetch_new_leads(after_ts):
     (timestamp Unix). Filtre sur les sources Idealista/Fotocasa/Habitaclia.
     """
     service = _get_service()
-    # Boîte de réception uniquement + dernières 24h + expéditeurs connus.
+    # Boîte de réception uniquement + expéditeurs connus.
+    # Après un reset_timestamp (after_ts == 0), on élargit à 3 jours ; sinon 24h.
     # On refiltre ensuite par timestamp (internalDate) pour ne traiter que le nouveau.
+    window = "3d" if after_ts <= 0 else "1d"
     senders = " OR ".join(config.PORTAL_SENDERS.keys())
-    query = f"label:INBOX newer_than:1d from:({senders})"
+    query = f"label:INBOX newer_than:{window} from:({senders})"
     print(f"[gmail] requête: {query}")
 
     leads = []
