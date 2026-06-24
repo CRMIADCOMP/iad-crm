@@ -84,6 +84,17 @@ def manual_run():
                     "note": "Voir /status dans ~30s pour le résumé"}), 202
 
 
+@app.route("/reset_timestamp", methods=["POST"])
+def reset_timestamp():
+    """Remet last_run_ts à 0 : le prochain /run retraitera tous les mails des dernières 24h."""
+    token = os.environ.get("RUN_TOKEN")
+    if token and request.args.get("token") != token:
+        return jsonify({"error": "unauthorized"}), 401
+    db.set_last_run_ts(0)
+    return jsonify({"status": "timestamp_reset", "last_run_ts": db.get_last_run_ts(),
+                    "note": "Lance /run pour retraiter les mails des dernières 24h"}), 200
+
+
 @app.route("/status")
 def status():
     """Résumé du dernier run (sans dépendre de l'email)."""
