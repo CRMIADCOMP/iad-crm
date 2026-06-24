@@ -35,6 +35,9 @@ RUN_HOURS = [int(h) for h in os.environ.get("RUN_HOURS", "8,12,18").split(",")]
 # Base de données SQLite (réponses WhatsApp + état des runs)
 DB_PATH = os.environ.get("DB_PATH", "crm.db")
 
+# Délai (secondes) entre deux écritures Sheets pour éviter le quota 429
+SHEETS_WRITE_DELAY = float(os.environ.get("SHEETS_WRITE_DELAY", "1"))
+
 # Sources de leads à détecter
 LEAD_SOURCES = ["Idealista", "Fotocasa", "Habitaclia"]
 

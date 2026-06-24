@@ -134,6 +134,11 @@ RE_NAME = re.compile(
 RE_IDEALISTA_MARKER = re.compile(r"espera tu respuesta", re.I)
 # Référence dans le sujet Fotocasa/Habitaclia : "... con referencia 926287 - De ..."
 RE_SUBJECT_REF = re.compile(r"con referencia\s+([A-Za-z0-9\-]+)", re.I)
+# Idealista — sujet "Nuevo mensaje de [NOM] sobre tu inmueble, con ref: 802931"
+RE_IDEALISTA_SUBJECT_NAME = re.compile(r"nuevo mensaje de\s+(.+?)\s+sobre tu inmueble", re.I)
+RE_IDEALISTA_SUBJECT_REF = re.compile(r"con\s+ref\.?:?\s*(\d[A-Za-z0-9\-]*)", re.I)
+# Idealista — notification de réponse messagerie interne (PAS un nouveau lead)
+RE_RESPUESTA_DE = re.compile(r"^\s*respuesta de\s+(.+?)\s+sobre tu inmueble", re.I)
 # Suite de chiffres séparés par espaces, avec éventuel préfixe +/indicatif
 RE_PHONE_RUN = re.compile(r"\+?\d[\d\s]{6,}\d")
 
@@ -371,17 +376,42 @@ def fetch_new_leads(after_ts):
             if not source:
                 continue
 
+            # Notification de réponse messagerie interne Idealista : pas un lead.
+            mresp = RE_RESPUESTA_DE.search(subject)
+            if mresp:
+                resp_name = mresp.group(1).strip()
+                mref = RE_IDEALISTA_SUBJECT_REF.search(subject) or RE_REF.search(full)
+                resp_ref = mref.group(1).strip() if mref else ""
+                lead = {
+                    "kind": "respuesta_idealista",
+                    "nombre": resp_name, "ref": resp_ref, "fuente": "Idealista",
+                    "telefono": "", "email": "", "url": "", "message": "",
+                    "gmail_id": mid, "received_at": internal_ts, "subject": subject,
+                }
+                print(f"[gmail] RESPUESTA Idealista | nombre='{resp_name}' ref='{resp_ref}' (non écrit)")
+                leads.append(lead)
+                continue
+
             if source == "Idealista":
                 name, phone, email, message = _extract_idealista_lead(full)
+                # Nom : sujet en priorité, corps en fallback
+                msname = RE_IDEALISTA_SUBJECT_NAME.search(subject)
+                if msname:
+                    name = msname.group(1).strip()
                 urls = RE_URL.findall(full)
+                # Ref : sujet ("con ref:") en priorité, sinon corps, sinon URL
                 ref = ""
-                mref = RE_REF.search(full)
-                if mref:
-                    ref = mref.group(1).strip()
-                elif urls:
-                    mnum = RE_NUM_IN_URL.search(urls[0])
-                    if mnum:
-                        ref = mnum.group(1)
+                msref = RE_IDEALISTA_SUBJECT_REF.search(subject)
+                if msref:
+                    ref = msref.group(1).strip()
+                else:
+                    mref = RE_REF.search(full)
+                    if mref:
+                        ref = mref.group(1).strip()
+                    elif urls:
+                        mnum = RE_NUM_IN_URL.search(urls[0])
+                        if mnum:
+                            ref = mnum.group(1)
                 lead = {
                     "nombre": name, "telefono": phone, "email": email,
                     "fuente": source, "url": urls[0].strip() if urls else "",

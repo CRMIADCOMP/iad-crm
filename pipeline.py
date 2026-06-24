@@ -72,6 +72,15 @@ def process_new_leads(stats):
 
     for lead in leads:
         try:
+            # Notification de réponse Idealista : pas un nouveau lead, juste au rapport.
+            if lead.get("kind") == "respuesta_idealista":
+                nom = lead.get("nombre") or "?"
+                ref = lead.get("ref") or "?"
+                stats["idealista_responses"].append(
+                    f"El prospecto {nom} ha respondido en Idealista (ref: {ref})"
+                )
+                continue
+
             feuille, iad_url = sheets.match_lead_to_sheet(lead)
             matched = bool(feuille)
 
@@ -262,6 +271,10 @@ def send_report(stats):
         f"Échecs d'envoi WhatsApp     : {stats['wa_failed']}",
         "",
     ]
+    if stats.get("idealista_responses"):
+        lines.append("Respuestas en Idealista (mensajería interna) :")
+        lines.extend("  " + r for r in stats["idealista_responses"][:60])
+        lines.append("")
     if stats["details"]:
         lines.append("Détails :")
         lines.extend("  " + d for d in stats["details"][:60])
@@ -289,8 +302,9 @@ def run():
         "wa_first_sent": 0, "wa_failed": 0, "wa_long_search_sent": 0,
         "relances_sent": 0, "closed_7d": 0,
         "replies_processed": 0, "replies_unmatched": 0,
-        "details": [], "errors": [],
+        "details": [], "errors": [], "idealista_responses": [],
     }
+    sheets.reset_cache()
     print(f"[pipeline] démarrage {datetime.datetime.now().isoformat()}")
     try:
         process_new_leads(stats)

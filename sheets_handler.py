@@ -5,6 +5,7 @@ Accès au Google Sheets via un compte de service (gspread).
 - Mise à jour des colonnes F/G/H d'après l'analyse IA.
 - Gestion des états (relances, clôtures).
 """
+import time
 import datetime
 
 import gspread
@@ -20,6 +21,41 @@ SCOPES = [
 
 _client = None
 _spreadsheet = None
+
+# --- Cache mémoire (réinitialisé à chaque run) pour limiter les appels API ----
+_ws_objs = {}        # titre -> objet worksheet
+_ws_list = None      # liste des worksheets (1 seul appel/run)
+_values_cache = {}   # titre -> get_all_values()
+_config_rows = None  # lignes de l'onglet Config
+
+
+def reset_cache():
+    """À appeler au début de chaque run du pipeline."""
+    global _ws_list, _config_rows
+    _ws_objs.clear()
+    _values_cache.clear()
+    _ws_list = None
+    _config_rows = None
+
+
+def _all_worksheets():
+    global _ws_list
+    if _ws_list is None:
+        _ws_list = _get_spreadsheet().worksheets()
+    return _ws_list
+
+
+def _write_throttle():
+    """Pause entre deux écritures pour éviter le quota 429."""
+    time.sleep(config.SHEETS_WRITE_DELAY)
+
+
+def _values_for(ws):
+    """get_all_values() mis en cache par feuille."""
+    name = ws.title
+    if name not in _values_cache:
+        _values_cache[name] = ws.get_all_values()
+    return _values_cache[name]
 
 
 def _get_spreadsheet():
@@ -45,22 +81,24 @@ def _get_config_worksheet():
     Renvoie l'onglet Config. Tolérant au nom exact (emoji/espaces) :
     essaie le nom configuré, sinon le premier onglet contenant 'config'.
     """
-    ss = _get_spreadsheet()
-    try:
-        return ss.worksheet(config.CONFIG_SHEET_NAME)
-    except gspread.WorksheetNotFound:
-        for ws in ss.worksheets():
-            if "config" in ws.title.lower():
-                print(f"[config] onglet Config trouvé par tolérance: '{ws.title}'")
-                return ws
-        raise
+    for ws in _all_worksheets():
+        if ws.title == config.CONFIG_SHEET_NAME:
+            return ws
+    for ws in _all_worksheets():
+        if "config" in ws.title.lower():
+            print(f"[config] onglet Config trouvé par tolérance: '{ws.title}'")
+            return ws
+    raise gspread.WorksheetNotFound(config.CONFIG_SHEET_NAME)
 
 
 def load_config_rows():
-    """Renvoie les lignes de l'onglet Config (sans l'en-tête)."""
-    ws = _get_config_worksheet()
-    rows = ws.get_all_values()
-    return rows[1:] if rows else []
+    """Renvoie les lignes de l'onglet Config (sans l'en-tête), mises en cache."""
+    global _config_rows
+    if _config_rows is None:
+        ws = _get_config_worksheet()
+        rows = _values_for(ws)
+        _config_rows = rows[1:] if rows else []
+    return _config_rows
 
 
 def _ref_norm(value):
@@ -157,17 +195,32 @@ def get_iad_url_for_sheet(feuille):
 
 
 def _get_or_create_worksheet(name):
+    # 1) cache d'objets
+    if name in _ws_objs:
+        return _ws_objs[name]
+
+    # 2) recherche par nom EXACT parmi les feuilles existantes (évite les doublons)
+    for ws in _all_worksheets():
+        if ws.title == name:
+            _ws_objs[name] = ws
+            # garantit l'en-tête (via valeurs en cache)
+            vals = _values_for(ws)
+            if not vals or vals[0][:1] != [config.PROSPECT_HEADERS[0]]:
+                _write_throttle()
+                ws.insert_row(config.PROSPECT_HEADERS, 1)
+                _values_cache[name] = [list(config.PROSPECT_HEADERS)] + vals
+            return ws
+
+    # 3) création seulement si elle n'existe vraiment pas
     ss = _get_spreadsheet()
-    try:
-        ws = ss.worksheet(name)
-    except gspread.WorksheetNotFound:
-        ws = ss.add_worksheet(title=name, rows=200, cols=len(config.PROSPECT_HEADERS))
-        ws.append_row(config.PROSPECT_HEADERS)
-        return ws
-    # garantit l'en-tête
-    first = ws.row_values(1)
-    if not first or first[:1] != [config.PROSPECT_HEADERS[0]]:
-        ws.insert_row(config.PROSPECT_HEADERS, 1)
+    _write_throttle()
+    ws = ss.add_worksheet(title=name, rows=200, cols=len(config.PROSPECT_HEADERS))
+    _write_throttle()
+    ws.append_row(config.PROSPECT_HEADERS)
+    _ws_objs[name] = ws
+    _values_cache[name] = [list(config.PROSPECT_HEADERS)]
+    if _ws_list is not None:
+        _ws_list.append(ws)
     return ws
 
 
@@ -179,7 +232,7 @@ def find_prospect(ws, phone="", email=""):
     """
     phone_n = normalize_phone(phone)
     email_n = (email or "").strip().lower()
-    values = ws.get_all_values()
+    values = _values_for(ws)
     for i, row in enumerate(values[1:], start=2):  # ligne 1 = en-tête
         r_phone = normalize_phone(row[config.COL["telefono"] - 1] if len(row) >= config.COL["telefono"] else "")
         r_email = (row[config.COL["email"] - 1] if len(row) >= config.COL["email"] else "").strip().lower()
@@ -198,15 +251,13 @@ def upsert_prospect(feuille, lead):
     ws = _get_or_create_worksheet(feuille)
     row_idx, existing = find_prospect(ws, lead.get("telefono", ""), lead.get("email", ""))
     today = datetime.date.today().isoformat()
-    nombre = lead.get("nombre") or ""
 
     # Nettoyage : aucune donnée copiée avec des espaces superflus
-    nombre = nombre.strip()
+    nombre = (lead.get("nombre") or "").strip()
     telefono = (lead.get("telefono", "") or "").strip()
     email = (lead.get("email", "") or "").strip()
     fuente = (lead.get("fuente", "") or "").strip()
-    # Notas stocke le message du prospect
-    notas = (lead.get("message") or lead.get("subject") or "").strip()
+    # Colonne E (Notas) laissée VIDE : le prospect la remplira manuellement.
 
     if row_idx is None:
         new_row = [""] * len(config.PROSPECT_HEADERS)
@@ -214,50 +265,68 @@ def upsert_prospect(feuille, lead):
         new_row[config.COL["telefono"] - 1] = telefono
         new_row[config.COL["email"] - 1] = email
         new_row[config.COL["fuente"] - 1] = fuente
-        new_row[config.COL["notas"] - 1] = notas
         new_row[config.COL["fecha_contacto"] - 1] = today
         new_row[config.COL["estado_final"] - 1] = "Nuevo contacto"
+        vals = _values_for(ws)
+        new_index = len(vals) + 1
+        _write_throttle()
         ws.append_row(new_row, value_input_option="USER_ENTERED")
-        # nouvelle ligne = dernière
-        all_vals = ws.get_all_values()
-        return len(all_vals), True, new_row
+        vals.append(new_row)  # garde le cache synchronisé
+        return new_index, True, new_row
 
-    # mise à jour : complète les champs manquants seulement
+    # mise à jour : complète les champs manquants seulement (jamais Notas)
     def _existing(col_name):
         idx = config.COL[col_name] - 1
         return (existing[idx] if len(existing) > idx else "").strip()
 
     updates = {}
     if nombre and not _existing("nombre"):
-        updates[config.COL["nombre"]] = nombre
+        updates["nombre"] = nombre
     if email and not _existing("email"):
-        updates[config.COL["email"]] = email
+        updates["email"] = email
     if telefono and not _existing("telefono"):
-        updates[config.COL["telefono"]] = telefono
-    if notas and not _existing("notas"):
-        updates[config.COL["notas"]] = notas
-    for col, val in updates.items():
-        ws.update_cell(row_idx, col, val)
+        updates["telefono"] = telefono
+    if updates:
+        update_cells(feuille, row_idx, updates)
     return row_idx, False, existing
+
+
+def _cache_set(name, row_idx, col_idx, val):
+    """Met à jour la valeur en cache (row_idx/col_idx 1-based)."""
+    vals = _values_cache.get(name)
+    if vals is None:
+        return
+    while len(vals) < row_idx:
+        vals.append([])
+    row = vals[row_idx - 1]
+    while len(row) < col_idx:
+        row.append("")
+    row[col_idx - 1] = val
 
 
 def update_cells(feuille, row_idx, col_values):
     """col_values : dict {nom_colonne_config.COL: valeur}."""
     ws = _get_or_create_worksheet(feuille)
     for col_name, val in col_values.items():
-        ws.update_cell(row_idx, config.COL[col_name], val)
+        col_idx = config.COL[col_name]
+        _write_throttle()
+        ws.update_cell(row_idx, col_idx, val)
+        _cache_set(ws.title, row_idx, col_idx, val)
 
 
 def get_cell(feuille, row_idx, col_name):
     ws = _get_or_create_worksheet(feuille)
-    return ws.cell(row_idx, config.COL[col_name]).value or ""
+    vals = _values_for(ws)
+    idx = config.COL[col_name] - 1
+    if row_idx - 1 < len(vals) and idx < len(vals[row_idx - 1]):
+        return vals[row_idx - 1][idx] or ""
+    return ""
 
 
 def list_all_prospect_sheets():
     """Noms de toutes les feuilles de prospects (exclut tout onglet 'Config')."""
-    ss = _get_spreadsheet()
     names = []
-    for ws in ss.worksheets():
+    for ws in _all_worksheets():
         if ws.title == config.CONFIG_SHEET_NAME or "config" in ws.title.lower():
             continue
         names.append(ws.title)
@@ -303,7 +372,7 @@ def diag():
 def iter_prospects(feuille):
     """Génère (row_idx, dict_colonnes) pour chaque prospect d'une feuille."""
     ws = _get_or_create_worksheet(feuille)
-    values = ws.get_all_values()
+    values = _values_for(ws)
     for i, row in enumerate(values[1:], start=2):
         def g(name):
             idx = config.COL[name] - 1

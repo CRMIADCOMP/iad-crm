@@ -115,6 +115,7 @@ def diag():
     except Exception as e:  # noqa: BLE001
         out["gmail"] = {"error": f"{type(e).__name__}: {e}"}
     try:
+        sheets_handler.reset_cache()
         out["sheets"] = sheets_handler.diag()
     except Exception as e:  # noqa: BLE001
         out["sheets"] = {"error": f"{type(e).__name__}: {e}"}
