@@ -92,8 +92,16 @@ CONFIG_COL = {
 # ---------------------------------------------------------------------------
 # Règles métier
 # ---------------------------------------------------------------------------
-# États autorisant l'envoi d'un nouveau message
+# Les données prospects commencent TOUJOURS à la ligne 4.
+# Les lignes 1, 2, 3 (titres/en-têtes existants) ne doivent JAMAIS être touchées.
+DATA_START_ROW = 4
+
+# États autorisant l'envoi du PREMIER message
 SENDABLE_STATES = {"", "Nuevo contacto", "WhatsApp enviado"}
+# États saisis manuellement : ne JAMAIS les écraser
+MANUAL_STATES = {"Visita apuntada", "Visita hecha", "Fuera"}
+# États depuis lesquels la clôture automatique 7j est autorisée
+AUTO_CLOSE_FROM = {"", "Nuevo contacto", "WhatsApp enviado", "No responde"}
 FALLBACK_NAME = "vecino/a"
 # Feuille de repli : les leads non matchés à l'onglet Config y sont écrits
 # (au lieu d'être perdus). Aucun WhatsApp n'est envoyé pour ces leads.

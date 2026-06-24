@@ -200,25 +200,19 @@ def _get_or_create_worksheet(name):
         return _ws_objs[name]
 
     # 2) recherche par nom EXACT parmi les feuilles existantes (évite les doublons)
+    #    Les en-têtes existent déjà : on ne les crée/modifie JAMAIS.
     for ws in _all_worksheets():
         if ws.title == name:
             _ws_objs[name] = ws
-            # garantit l'en-tête (via valeurs en cache)
-            vals = _values_for(ws)
-            if not vals or vals[0][:1] != [config.PROSPECT_HEADERS[0]]:
-                _write_throttle()
-                ws.insert_row(config.PROSPECT_HEADERS, 1)
-                _values_cache[name] = [list(config.PROSPECT_HEADERS)] + vals
             return ws
 
-    # 3) création seulement si elle n'existe vraiment pas
+    # 3) création seulement si elle n'existe vraiment pas (ex. feuille de repli).
+    #    On ne crée PAS d'en-têtes : les données commencent à la ligne 4.
     ss = _get_spreadsheet()
     _write_throttle()
     ws = ss.add_worksheet(title=name, rows=200, cols=len(config.PROSPECT_HEADERS))
-    _write_throttle()
-    ws.append_row(config.PROSPECT_HEADERS)
     _ws_objs[name] = ws
-    _values_cache[name] = [list(config.PROSPECT_HEADERS)]
+    _values_cache[name] = []
     if _ws_list is not None:
         _ws_list.append(ws)
     return ws
@@ -233,7 +227,8 @@ def find_prospect(ws, phone="", email=""):
     phone_n = normalize_phone(phone)
     email_n = (email or "").strip().lower()
     values = _values_for(ws)
-    for i, row in enumerate(values[1:], start=2):  # ligne 1 = en-tête
+    start = config.DATA_START_ROW  # données à partir de la ligne 4 (lignes 1-3 réservées)
+    for i, row in enumerate(values[start - 1:], start=start):
         r_phone = normalize_phone(row[config.COL["telefono"] - 1] if len(row) >= config.COL["telefono"] else "")
         r_email = (row[config.COL["email"] - 1] if len(row) >= config.COL["email"] else "").strip().lower()
         if phone_n and r_phone and phone_n == r_phone:
@@ -265,13 +260,18 @@ def upsert_prospect(feuille, lead):
         new_row[config.COL["telefono"] - 1] = telefono
         new_row[config.COL["email"] - 1] = email
         new_row[config.COL["fuente"] - 1] = fuente
-        new_row[config.COL["fecha_contacto"] - 1] = today
+        new_row[config.COL["fecha_contacto"] - 1] = today  # col I : date 1ère détection
         new_row[config.COL["estado_final"] - 1] = "Nuevo contacto"
         vals = _values_for(ws)
-        new_index = len(vals) + 1
+        # Écrit à la 1ère ligne libre, jamais avant la ligne 4 (lignes 1-3 réservées)
+        new_index = max(len(vals) + 1, config.DATA_START_ROW)
         _write_throttle()
-        ws.append_row(new_row, value_input_option="USER_ENTERED")
-        vals.append(new_row)  # garde le cache synchronisé
+        ws.update(range_name=f"A{new_index}", values=[new_row],
+                  value_input_option="USER_ENTERED")
+        # garde le cache synchronisé
+        while len(vals) < new_index:
+            vals.append([])
+        vals[new_index - 1] = new_row
         return new_index, True, new_row
 
     # mise à jour : complète les champs manquants seulement (jamais Notas)
@@ -373,7 +373,8 @@ def iter_prospects(feuille):
     """Génère (row_idx, dict_colonnes) pour chaque prospect d'une feuille."""
     ws = _get_or_create_worksheet(feuille)
     values = _values_for(ws)
-    for i, row in enumerate(values[1:], start=2):
+    start = config.DATA_START_ROW  # lignes 1-3 réservées
+    for i, row in enumerate(values[start - 1:], start=start):
         def g(name):
             idx = config.COL[name] - 1
             return row[idx] if len(row) > idx else ""

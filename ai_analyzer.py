@@ -32,7 +32,7 @@ USER_TEMPLATE = """Analiza este/estos mensaje(s) de un prospecto inmobiliario y 
 - "presupuesto": el presupuesto/budget mencionado (texto corto, ej "250.000€" o "" si no se menciona)
 - "tiempo_busqueda_texto": cuánto tiempo lleva buscando, tal cual lo dice (ej "6 meses", "más de un año", "" si no se menciona)
 - "tiempo_busqueda_meses": número entero de meses estimado a partir del texto (0 si no se menciona)
-- "pago_validado": estado de la financiación. Uno de: "Validado" (banco/bróker ya aprobó o tiene financiación lista), "En proceso" (está hablando con banco/bróker), "No iniciado" (aún no ha hecho nada), "" (no se menciona)
+- "pago_validado": estado de la financiación. EXACTAMENTE uno de: "Sí - Validado" (banco/bróker ya aprobó o tiene financiación lista), "En curso" (está hablando con banco/bróker o en trámite), "No - Rechazado" (le han denegado la financiación), "Pendiente" (aún no ha hecho nada / no ha empezado), "" (no se menciona)
 - "interesado": true/false/null — si sigue interesado en el inmueble (null si no está claro)
 - "resumen": resumen breve (1 frase) de la respuesta
 

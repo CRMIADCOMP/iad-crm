@@ -127,6 +127,15 @@ def process_new_leads(stats):
                 stats["details"].append(f"⚠️ Pas de téléphone pour {lead.get('email')} ({feuille})")
                 continue
 
+            # URL obligatoire : sans URL d'annonce on n'envoie PAS, on alerte.
+            if not msg_url:
+                stats["alerts"].append(
+                    f"[ALERTA] No se pudo enviar WhatsApp a {lead.get('nombre') or '?'} "
+                    f"({phone}) — URL manquante pour la feuille {feuille}. "
+                    f"Vérifier l'onglet Config."
+                )
+                continue
+
             if stats.get("dry_run"):
                 print(f"[DRY RUN] whatsapp ignoré pour {phone} (primer contacto, {feuille})")
                 stats["wa_dry_skipped"] += 1
@@ -136,10 +145,11 @@ def process_new_leads(stats):
             ok, info = whatsapp.send_message(phone, body)
             today = _today().isoformat()
             if ok:
+                # ne touche PAS fecha_contacto (col I) : fixée à la 1ère détection
                 sheets.update_cells(feuille, row_idx, {
-                    "fecha_contacto": today,
-                    "ultimo_mensaje": today,
-                    "estado_final": "WhatsApp enviado",
+                    "ultimo_mensaje": today,          # col J : maj à chaque envoi
+                    "relance_j2": "Pendiente",        # col K
+                    "estado_final": "WhatsApp enviado",  # col L
                 })
                 stats["wa_first_sent"] += 1
             else:
@@ -178,15 +188,20 @@ def process_replies(stats):
             analysis = ai_analyzer.analyze_replies(bodies)
             stats["replies_processed"] += 1
 
+            # F/G/H : remplis UNIQUEMENT si la cellule est vide (ne pas écraser le manuel)
             updates = {}
-            if analysis.get("presupuesto"):
+            if analysis.get("presupuesto") and not sheets.get_cell(feuille, row_idx, "presupuesto").strip():
                 updates["presupuesto"] = analysis["presupuesto"]
-            if analysis.get("tiempo_busqueda_texto"):
+            if analysis.get("tiempo_busqueda_texto") and not sheets.get_cell(feuille, row_idx, "tiempo_busqueda").strip():
                 updates["tiempo_busqueda"] = analysis["tiempo_busqueda_texto"]
-            if analysis.get("pago_validado"):
+            if analysis.get("pago_validado") and not sheets.get_cell(feuille, row_idx, "pago_validado").strip():
                 updates["pago_validado"] = analysis["pago_validado"]
-            updates["estado_final"] = "Respondió"
-            sheets.update_cells(feuille, row_idx, updates)
+            # K : le prospect a répondu -> relance non nécessaire
+            if (sheets.get_cell(feuille, row_idx, "relance_j2").strip() != "No necesaria"):
+                updates["relance_j2"] = "No necesaria"
+            # On ne modifie PAS l'état (col L) ni les états manuels.
+            if updates:
+                sheets.update_cells(feuille, row_idx, updates)
 
             # Étape 11 : recherche > 1 an -> message doux spécial
             meses = analysis.get("tiempo_busqueda_meses", 0)
@@ -199,9 +214,9 @@ def process_replies(stats):
                 body = whatsapp.build_long_search(p.get("nombre", ""))
                 ok, info = whatsapp.send_message(phone, body)
                 if ok:
+                    # message doux sans URL d'annonce : on met juste à jour col J
                     sheets.update_cells(feuille, row_idx, {
                         "ultimo_mensaje": _today().isoformat(),
-                        "estado_final": "Respondió - búsqueda larga",
                     })
                     stats["wa_long_search_sent"] += 1
                 else:
@@ -227,35 +242,51 @@ def process_relances_and_closures(stats):
                 if not phone or not fecha:
                     continue
 
+                # États manuels : ne JAMAIS les toucher
+                if estado in config.MANUAL_STATES:
+                    continue
+
+                relance = (p.get("relance_j2") or "").strip()
+
                 # a-t-il répondu ? (au moins un message reçu après le 1er contact)
                 replied = bool(db.get_messages_for_phone(phone, since=_date_to_ts(fecha)))
                 if replied:
-                    continue
-                if estado not in config.SENDABLE_STATES:
+                    # col K : relance non nécessaire
+                    if relance != "No necesaria":
+                        sheets.update_cells(feuille, row_idx, {"relance_j2": "No necesaria"})
                     continue
 
                 days = (today - fecha).days
 
-                # Clôture après 7 jours sans réponse
-                if days >= config.NO_REPLY_CLOSE_DAYS:
+                # Clôture après 7 jours sans réponse (depuis un état "ouvert")
+                if days >= config.NO_REPLY_CLOSE_DAYS and estado in config.AUTO_CLOSE_FROM \
+                        and estado != "Sin respuesta - 7d":
                     sheets.update_cells(feuille, row_idx, {"estado_final": "Sin respuesta - 7d"})
                     stats["closed_7d"] += 1
                     continue
 
-                # Relance J+2 (une seule fois)
-                if days >= config.RELANCE_DELAY_DAYS and not (p.get("relance_j2") or "").strip():
+                # Relance J+2 : seulement si col K == "Pendiente" (1er message déjà envoyé)
+                if days >= config.RELANCE_DELAY_DAYS and relance == "Pendiente":
+                    # URL obligatoire : sans URL on n'envoie pas, on alerte.
+                    url = sheets.get_iad_url_for_sheet(feuille)
+                    if not url:
+                        stats["alerts"].append(
+                            f"[ALERTA] No se pudo enviar WhatsApp a {p.get('nombre') or '?'} "
+                            f"({phone}) — URL manquante pour la feuille {feuille}. "
+                            f"Vérifier l'onglet Config."
+                        )
+                        continue
                     if stats.get("dry_run"):
                         print(f"[DRY RUN] whatsapp ignoré pour {phone} (relance J+2)")
                         stats["wa_dry_skipped"] += 1
                         continue
-                    # URL de l'annonce relue depuis l'onglet Config
-                    url = sheets.get_iad_url_for_sheet(feuille)
                     body = whatsapp.build_relance(p.get("nombre", ""), url)
                     ok, info = whatsapp.send_message(phone, body)
                     if ok:
                         sheets.update_cells(feuille, row_idx, {
-                            "relance_j2": today.isoformat(),
-                            "ultimo_mensaje": today.isoformat(),
+                            "relance_j2": "Enviada",            # col K
+                            "ultimo_mensaje": today.isoformat(),  # col J
+                            "estado_final": "No responde",        # col L
                         })
                         stats["relances_sent"] += 1
                     else:
@@ -287,6 +318,10 @@ def send_report(stats):
         f"Échecs d'envoi WhatsApp     : {stats['wa_failed']}",
         "",
     ]
+    if stats.get("alerts"):
+        lines.append("⚠️ ALERTAS (acción requerida) :")
+        lines.extend("  " + a for a in stats["alerts"][:60])
+        lines.append("")
     if stats.get("idealista_responses"):
         lines.append("Respuestas en Idealista (mensajería interna) :")
         lines.extend("  " + r for r in stats["idealista_responses"][:60])
@@ -320,7 +355,7 @@ def run(dry_run=False):
         "wa_dry_skipped": 0,
         "relances_sent": 0, "closed_7d": 0,
         "replies_processed": 0, "replies_unmatched": 0,
-        "details": [], "errors": [], "idealista_responses": [],
+        "details": [], "errors": [], "idealista_responses": [], "alerts": [],
     }
     sheets.reset_cache()
     print(f"[pipeline] démarrage {datetime.datetime.now().isoformat()} (dry_run={dry_run})")
