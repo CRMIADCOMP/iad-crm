@@ -176,6 +176,20 @@ def send_report_route():
         return jsonify({"status": "error", "message": str(e)}), 500
 
 
+@app.route("/test_email", methods=["GET", "POST"])
+def test_email():
+    """Envoi minimal pour isoler un problème d'envoi email."""
+    if not _authorized(request):
+        return jsonify({"error": "unauthorized"}), 401
+    import gmail_reader
+    try:
+        resp = gmail_reader.send_email(config.REPORT_EMAIL, "Test CRM IAD", "Test envoi rapport")
+        msg_id = resp.get("id") if isinstance(resp, dict) else None
+        return jsonify({"status": "ok", "message": "Email de test envoyé", "id": msg_id}), 200
+    except Exception as e:  # noqa: BLE001
+        return jsonify({"status": "error", "message": str(e)}), 500
+
+
 @app.route("/status")
 def status():
     """Résumé du dernier run (sans dépendre de l'email)."""
@@ -308,6 +322,7 @@ border-radius:8px;font-weight:bold;font-size:15px;}
     <button class="btn orange" onclick="act('POST','/reset_timestamp','Reset timestamp')">🔁 Reset timestamp</button>
     <button class="btn gray" onclick="act('GET','/diag','Diagnostic')">🔍 Diagnostic complet</button>
     <button class="btn" onclick="act('POST','/send_report','Envoi du rapport')">📧 Générer et envoyer le rapport</button>
+    <button class="btn light" onclick="act('POST','/test_email','Test email')">✉️ Test email minimal</button>
   </div>
   <div class="spinner" id="spin"></div>
   <pre id="result" style="display:none;"></pre>

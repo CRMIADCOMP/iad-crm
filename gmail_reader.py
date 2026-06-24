@@ -31,10 +31,28 @@ SOURCE_SIGNATURES = {
 }
 
 
+_scopes_logged = False
+
+
 def _get_service():
+    global _scopes_logged
     config.gmail_credentials_path()
     token_path = config.gmail_token_path()
     creds = Credentials.from_authorized_user_file(token_path, SCOPES)
+    if not _scopes_logged:
+        _scopes_logged = True
+        granted = getattr(creds, "scopes", None)
+        print(f"[gmail] scopes demandés (code): {SCOPES}")
+        print(f"[gmail] scopes accordés (token): {granted}")
+        can_send = granted and any(
+            s in granted for s in (
+                "https://www.googleapis.com/auth/gmail.send",
+                "https://www.googleapis.com/auth/gmail.modify",
+                "https://mail.google.com/",
+            )
+        )
+        print(f"[gmail] envoi autorisé par le token: {can_send}"
+              + ("" if can_send else " -> RÉGÉNÉRER token.json avec setup_auth.py !"))
     if creds and creds.expired and creds.refresh_token:
         creds.refresh(Request())
         with open(token_path, "w", encoding="utf-8") as f:
@@ -42,16 +60,35 @@ def _get_service():
     return build("gmail", "v1", credentials=creds, cache_discovery=False)
 
 
-def send_email(to_addr, subject, body_text):
-    """Envoie un email texte simple depuis le compte Gmail authentifié."""
-    import email.mime.text
+def send_email(to_addr, subject, body_text, html_body=None):
+    """Envoie un email depuis le compte Gmail. Si html_body est fourni,
+    envoie un multipart/alternative (texte + HTML). Renvoie la réponse API."""
+    from email.mime.text import MIMEText
+    print("[rapport] construction du message HTML..." if html_body
+          else "[rapport] construction du message texte...")
     service = _get_service()
-    mime = email.mime.text.MIMEText(body_text, _charset="utf-8")
+    print(f"[rapport] expéditeur: {config.GMAIL_ADDRESS}")
+    print(f"[rapport] destinataire: {to_addr}")
+    if html_body:
+        from email.mime.multipart import MIMEMultipart
+        mime = MIMEMultipart("alternative")
+        mime.attach(MIMEText(body_text, "plain", _charset="utf-8"))
+        mime.attach(MIMEText(html_body, "html", _charset="utf-8"))
+    else:
+        mime = MIMEText(body_text, _charset="utf-8")
     mime["to"] = to_addr
     mime["from"] = config.GMAIL_ADDRESS
     mime["subject"] = subject
     raw = base64.urlsafe_b64encode(mime.as_bytes()).decode("utf-8")
-    service.users().messages().send(userId="me", body={"raw": raw}).execute()
+    print("[rapport] appel Gmail API users().messages().send()...")
+    try:
+        resp = service.users().messages().send(userId="me", body={"raw": raw}).execute()
+        print(f"[rapport] réponse API: {{id: {resp.get('id')}, threadId: {resp.get('threadId')}}}")
+        print("[rapport] email envoyé avec succès")
+        return resp
+    except Exception as e:  # noqa: BLE001
+        print(f"[rapport] ERREUR: {e}")
+        raise
 
 
 def _decode_part(part):
