@@ -109,10 +109,26 @@ DATA_START_ROW = 4
 
 # États autorisant l'envoi du PREMIER message
 SENDABLE_STATES = {"", "Nuevo contacto", "WhatsApp enviado"}
+# Statut en cas d'échec d'envoi WhatsApp (retenté au run suivant).
+# Couleur recommandée dans la liste déroulante du Sheets : rouge clair #FF6B6B
+ERROR_WA_STATE = "Error envío WA"
 # États saisis manuellement : ne JAMAIS les écraser
 MANUAL_STATES = {"Visita apuntada", "Visita hecha", "Fuera"}
 # États depuis lesquels la clôture automatique 7j est autorisée
 AUTO_CLOSE_FROM = {"", "Nuevo contacto", "WhatsApp enviado", "No responde"}
+
+# Valeurs de la liste déroulante de la colonne L (Estado final).
+# Appliquées automatiquement à toutes les feuilles via /setup_dropdowns.
+ESTADO_FINAL_OPTIONS = [
+    "Nuevo contacto",
+    "WhatsApp enviado",
+    ERROR_WA_STATE,            # "Error envío WA"
+    "No responde",
+    "Sin respuesta - 7d",
+    "Visita apuntada",
+    "Visita hecha",
+    "Fuera",
+]
 FALLBACK_NAME = "vecino/a"
 # Feuille de repli : les leads non matchés à l'onglet Config y sont écrits
 # (au lieu d'être perdus). Aucun WhatsApp n'est envoyé pour ces leads.

@@ -176,6 +176,21 @@ def send_report_route():
         return jsonify({"status": "error", "message": str(e)}), 500
 
 
+@app.route("/setup_dropdowns", methods=["GET", "POST"])
+def setup_dropdowns():
+    """Applique la liste déroulante Estado final + couleur sur toutes les feuilles."""
+    if not _authorized(request):
+        return jsonify({"error": "unauthorized"}), 401
+    import sheets_handler
+    try:
+        sheets_handler.reset_cache()
+        done = sheets_handler.setup_estado_validation()
+        return jsonify({"status": "ok", "feuilles": done,
+                        "count": len(done), "valeurs": config.ESTADO_FINAL_OPTIONS}), 200
+    except Exception as e:  # noqa: BLE001
+        return jsonify({"status": "error", "message": str(e)}), 500
+
+
 @app.route("/test_email", methods=["GET", "POST"])
 def test_email():
     """Envoi minimal pour isoler un problème d'envoi email."""
@@ -323,6 +338,7 @@ border-radius:8px;font-weight:bold;font-size:15px;}
     <button class="btn gray" onclick="act('GET','/diag','Diagnostic')">🔍 Diagnostic complet</button>
     <button class="btn" onclick="act('POST','/send_report','Envoi du rapport')">📧 Générer et envoyer le rapport</button>
     <button class="btn light" onclick="act('POST','/test_email','Test email')">✉️ Test email minimal</button>
+    <button class="btn gray" onclick="act('POST','/setup_dropdowns','Listes déroulantes')">🔧 Configurer listes déroulantes (1 fois)</button>
   </div>
   <div class="spinner" id="spin"></div>
   <pre id="result" style="display:none;"></pre>

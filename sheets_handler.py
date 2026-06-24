@@ -359,6 +359,50 @@ def list_all_prospect_sheets():
     return names
 
 
+def setup_estado_validation():
+    """
+    Applique la liste déroulante de la colonne L (Estado final) + la couleur
+    rouge clair (#FF6B6B) pour 'Error envío WA' sur TOUTES les feuilles prospects,
+    en un seul appel API. Idempotent pour la validation (remplace l'existante).
+    Renvoie la liste des feuilles traitées.
+    """
+    ss = _get_spreadsheet()
+    options = config.ESTADO_FINAL_OPTIONS
+    col = config.COL["estado_final"] - 1  # col L -> index 11
+    requests = []
+    done = []
+    for ws in _all_worksheets():
+        t = ws.title.strip().lower()
+        if "config" in t or t in ("menú", "menu"):
+            continue
+        rng = {
+            "sheetId": ws.id,
+            "startRowIndex": config.DATA_START_ROW - 1,  # ligne 4 -> index 3
+            "endRowIndex": ws.row_count or 1000,
+            "startColumnIndex": col,
+            "endColumnIndex": col + 1,
+        }
+        # Liste déroulante
+        requests.append({"setDataValidation": {"range": rng, "rule": {
+            "condition": {"type": "ONE_OF_LIST",
+                          "values": [{"userEnteredValue": v} for v in options]},
+            "showCustomUi": True, "strict": False}}})
+        # Couleur rouge clair #FF6B6B pour "Error envío WA"
+        requests.append({"addConditionalFormatRule": {"rule": {
+            "ranges": [rng],
+            "booleanRule": {
+                "condition": {"type": "TEXT_EQ",
+                              "values": [{"userEnteredValue": config.ERROR_WA_STATE}]},
+                "format": {"backgroundColor": {"red": 1.0, "green": 0.42, "blue": 0.42}}}},
+            "index": 0}})
+        done.append(ws.title)
+    if requests:
+        _write_throttle()
+        ss.batch_update({"requests": requests})
+    print(f"[sheets] listes déroulantes appliquées sur {len(done)} feuilles: {done}")
+    return done
+
+
 def diag():
     """Diagnostic : vérifie l'accès au Sheets et résume le contenu."""
     out = {}
