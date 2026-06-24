@@ -62,9 +62,22 @@ def _build_prospect_index():
 # Étapes 1 à 7 : nouveaux leads
 # ---------------------------------------------------------------------------
 def process_new_leads(stats):
-    last_run = db.get_last_run_ts()
+    # Nettoyage : suppression auto des mails indésirables (corbeille)
     try:
-        leads = gmail_reader.fetch_new_leads(last_run)
+        deleted = gmail_reader.delete_unwanted_mails()
+        stats["mails_deleted"] = len(deleted)
+    except Exception as e:  # noqa: BLE001
+        stats["errors"].append(f"Gmail delete: {e}")
+
+    # Full scan : 30 jours, traite tout (after_ts=0) ; sinon fenêtre normale.
+    if stats.get("full_scan"):
+        last_run = 0
+        fetch_kwargs = {"window": "30d"}
+    else:
+        last_run = db.get_last_run_ts()
+        fetch_kwargs = {}
+    try:
+        leads = gmail_reader.fetch_new_leads(last_run, **fetch_kwargs)
     except Exception as e:  # noqa: BLE001
         stats["errors"].append(f"Gmail: {e}")
         return
@@ -304,6 +317,7 @@ def send_report(stats):
         f"Rapport CRM IAD — {now.strftime('%d/%m/%Y %H:%M')} (heure serveur)"
         + ("  [DRY RUN]" if stats.get("dry_run") else ""),
         "=" * 50,
+        f"Mails supprimés (corbeille) : {stats['mails_deleted']}",
         f"Leads détectés (Gmail)      : {stats['leads_detected']}",
         f"  - non matchés Config      : {stats['leads_unmatched']}",
         f"Nouveaux prospects          : {stats['prospects_new']}",
@@ -344,11 +358,12 @@ def send_report(stats):
 # ---------------------------------------------------------------------------
 # Point d'entrée du pipeline
 # ---------------------------------------------------------------------------
-def run(dry_run=False):
+def run(dry_run=False, full_scan=False):
     db.init_db()
     started = time.time()
     stats = {
-        "dry_run": bool(dry_run),
+        "dry_run": bool(dry_run), "full_scan": bool(full_scan),
+        "mails_deleted": 0,
         "leads_detected": 0, "leads_unmatched": 0,
         "prospects_new": 0, "prospects_updated": 0,
         "wa_first_sent": 0, "wa_failed": 0, "wa_long_search_sent": 0,
@@ -358,7 +373,8 @@ def run(dry_run=False):
         "details": [], "errors": [], "idealista_responses": [], "alerts": [],
     }
     sheets.reset_cache()
-    print(f"[pipeline] démarrage {datetime.datetime.now().isoformat()} (dry_run={dry_run})")
+    print(f"[pipeline] démarrage {datetime.datetime.now().isoformat()} "
+          f"(dry_run={dry_run}, full_scan={full_scan})")
     try:
         process_new_leads(stats)
         process_replies(stats)

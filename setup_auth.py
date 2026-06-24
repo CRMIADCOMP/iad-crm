@@ -16,9 +16,9 @@ import os
 
 from google_auth_oauthlib.flow import InstalledAppFlow
 
-# Lecture des emails (leads) + envoi (rapport quotidien).
+# Lecture+modif des emails (leads + corbeille) + envoi (rapport quotidien).
 SCOPES = [
-    "https://www.googleapis.com/auth/gmail.readonly",
+    "https://www.googleapis.com/auth/gmail.modify",
     "https://www.googleapis.com/auth/gmail.send",
 ]
 

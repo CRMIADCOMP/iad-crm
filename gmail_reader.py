@@ -16,9 +16,10 @@ from googleapiclient.discovery import build
 
 import config
 
-# Lecture des emails + envoi du rapport
+# Lecture des emails + envoi du rapport + corbeille (suppression auto).
+# 'modify' couvre la lecture ; il est requis pour trash().
 SCOPES = [
-    "https://www.googleapis.com/auth/gmail.readonly",
+    "https://www.googleapis.com/auth/gmail.modify",
     "https://www.googleapis.com/auth/gmail.send",
 ]
 
@@ -306,6 +307,45 @@ def _extract_lead(source, body, sender_email):
     }
 
 
+def delete_unwanted_mails():
+    """
+    Met à la corbeille tous les mails provenant des expéditeurs de
+    config.GMAIL_AUTO_DELETE. Renvoie la liste (expéditeur, sujet) supprimés.
+    Nécessite le scope gmail.modify.
+    """
+    if not config.GMAIL_AUTO_DELETE:
+        return []
+    service = _get_service()
+    senders = " OR ".join(config.GMAIL_AUTO_DELETE)
+    query = f"from:({senders}) newer_than:{config.GMAIL_DELETE_WINDOW}"
+    print(f"[gmail] requête suppression: {query}")
+
+    deleted = []
+    page_token = None
+    while True:
+        resp = service.users().messages().list(
+            userId="me", q=query, pageToken=page_token, maxResults=100
+        ).execute()
+        for ref in resp.get("messages", []):
+            mid = ref["id"]
+            try:
+                msg = service.users().messages().get(
+                    userId="me", id=mid, format="metadata",
+                    metadataHeaders=["From", "Subject"]).execute()
+                hdr = {h["name"].lower(): h["value"] for h in msg["payload"].get("headers", [])}
+                sender = hdr.get("from", "")
+                subject = hdr.get("subject", "")
+                service.users().messages().trash(userId="me", id=mid).execute()
+                deleted.append((sender, subject))
+                print(f"[gmail] mail supprimé : {sender} - {subject}")
+            except Exception as e:  # noqa: BLE001
+                print(f"[gmail] échec suppression {mid}: {e}")
+        page_token = resp.get("nextPageToken")
+        if not page_token:
+            break
+    return deleted
+
+
 def diag():
     """Diagnostic Gmail : vérifie l'auth et compte les mails correspondant à la requête."""
     out = {}
@@ -334,16 +374,18 @@ def diag():
     return out
 
 
-def fetch_new_leads(after_ts):
+def fetch_new_leads(after_ts, window=None):
     """
     Renvoie la liste des leads détectés dans les emails reçus après `after_ts`
     (timestamp Unix). Filtre sur les sources Idealista/Fotocasa/Habitaclia.
+    `window` force la fenêtre Gmail (ex. "30d" pour le full scan).
     """
     service = _get_service()
     # Boîte de réception uniquement + expéditeurs connus.
-    # Après un reset_timestamp (after_ts == 0), on élargit à 3 jours ; sinon 24h.
+    # window explicite (full scan) prioritaire ; sinon 3 jours après reset, sinon 24h.
     # On refiltre ensuite par timestamp (internalDate) pour ne traiter que le nouveau.
-    window = "3d" if after_ts <= 0 else "1d"
+    if not window:
+        window = "3d" if after_ts <= 0 else "1d"
     senders = " OR ".join(config.PORTAL_SENDERS.keys())
     query = f"label:INBOX newer_than:{window} from:({senders})"
     print(f"[gmail] requête: {query}")

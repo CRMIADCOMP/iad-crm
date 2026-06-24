@@ -25,9 +25,13 @@ app.register_blueprint(webhook_bp)
 db.init_db()
 
 
-def _run_pipeline_async(dry_run=False):
+def _run_pipeline_async(dry_run=False, full_scan=False):
     """Lance le pipeline dans un thread pour ne pas bloquer le scheduler/Flask."""
-    threading.Thread(target=pipeline.run, kwargs={"dry_run": dry_run}, daemon=True).start()
+    threading.Thread(
+        target=pipeline.run,
+        kwargs={"dry_run": dry_run, "full_scan": full_scan},
+        daemon=True,
+    ).start()
 
 
 # ---------------------------------------------------------------------------
@@ -83,6 +87,23 @@ def manual_run():
     _run_pipeline_async(dry_run=dry_run)
     return jsonify({"status": "pipeline_started", "dry_run": dry_run,
                     "note": "Voir /status dans ~30s pour le résumé"}), 202
+
+
+@app.route("/full_scan", methods=["GET", "POST"])
+def full_scan():
+    """
+    Scan unique des 30 derniers jours (newer_than:30d) : traite tous les leads.
+    Après ce run, le fonctionnement normal reprend (newer_than:1d aux runs 8h/12h/18h).
+    Option : ?dry_run=true pour ne pas envoyer de WhatsApp.
+    """
+    token = os.environ.get("RUN_TOKEN")
+    if token and request.args.get("token") != token:
+        return jsonify({"error": "unauthorized"}), 401
+    dry_run = request.args.get("dry_run", "").lower() in ("1", "true", "yes")
+    _run_pipeline_async(dry_run=dry_run, full_scan=True)
+    return jsonify({"status": "full_scan_started", "dry_run": dry_run,
+                    "window": "30d",
+                    "note": "Run unique. Ensuite retour automatique à newer_than:1d. Voir /status."}), 202
 
 
 @app.route("/reset_timestamp", methods=["POST"])

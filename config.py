@@ -50,6 +50,17 @@ PORTAL_SENDERS = {
     "cliente@fotocasa.pro": "Fotocasa",  # Fotocasa + Habitaclia (même expéditeur)
 }
 
+# Expéditeurs dont les mails sont mis automatiquement à la corbeille (nettoyage).
+# Nécessite le scope Gmail "modify" (régénérer token.json via setup_auth.py).
+GMAIL_AUTO_DELETE = [
+    "idealista@mailing.idealista.com",
+    "conseiller@lr.caisse-epargne.fr",
+    "no-reply@accounts.google.com",
+    "reminders@facebookmail.com",
+]
+# Fenêtre de recherche pour la suppression automatique
+GMAIL_DELETE_WINDOW = os.environ.get("GMAIL_DELETE_WINDOW", "30d")
+
 # ---------------------------------------------------------------------------
 # Colonnes des feuilles "prospects" (index 1 = colonne A)
 # ---------------------------------------------------------------------------
