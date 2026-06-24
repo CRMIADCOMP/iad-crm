@@ -199,28 +199,26 @@ def get_iad_url_for_sheet(feuille):
     return ""
 
 
-def _get_or_create_worksheet(name):
-    # 1) cache d'objets
+def _get_worksheet(name):
+    """
+    Renvoie la feuille dont le titre correspond (strip().lower() des deux côtés).
+    NE crée JAMAIS de feuille. Renvoie None si introuvable.
+    """
     if name in _ws_objs:
         return _ws_objs[name]
-
-    # 2) recherche par nom EXACT parmi les feuilles existantes (évite les doublons)
-    #    Les en-têtes existent déjà : on ne les crée/modifie JAMAIS.
-    for ws in _all_worksheets():
-        if ws.title == name:
+    target = (name or "").strip().lower()
+    all_ws = _all_worksheets()
+    for ws in all_ws:
+        if ws.title.strip().lower() == target:
             _ws_objs[name] = ws
             return ws
+    print(f"[sheets] feuille introuvable: '{name}' (repr: {repr(name)}) ; "
+          f"existantes: {[w.title for w in all_ws]}")
+    return None
 
-    # 3) création seulement si elle n'existe vraiment pas (ex. feuille de repli).
-    #    On ne crée PAS d'en-têtes : les données commencent à la ligne 4.
-    ss = _get_spreadsheet()
-    _write_throttle()
-    ws = ss.add_worksheet(title=name, rows=200, cols=len(config.PROSPECT_HEADERS))
-    _ws_objs[name] = ws
-    _values_cache[name] = []
-    if _ws_list is not None:
-        _ws_list.append(ws)
-    return ws
+
+def worksheet_exists(name):
+    return _get_worksheet(name) is not None
 
 
 def find_prospect(ws, phone="", email=""):
@@ -248,7 +246,9 @@ def upsert_prospect(feuille, lead):
     Insère ou met à jour un prospect dans la feuille `feuille`.
     Renvoie (row_index, is_new, row_values).
     """
-    ws = _get_or_create_worksheet(feuille)
+    ws = _get_worksheet(feuille)
+    if ws is None:
+        return None, False, None
     row_idx, existing = find_prospect(ws, lead.get("telefono", ""), lead.get("email", ""))
     today = datetime.date.today().isoformat()
 
@@ -311,7 +311,9 @@ def _cache_set(name, row_idx, col_idx, val):
 
 def update_cells(feuille, row_idx, col_values):
     """col_values : dict {nom_colonne_config.COL: valeur}."""
-    ws = _get_or_create_worksheet(feuille)
+    ws = _get_worksheet(feuille)
+    if ws is None:
+        return
     for col_name, val in col_values.items():
         col_idx = config.COL[col_name]
         _write_throttle()
@@ -320,7 +322,9 @@ def update_cells(feuille, row_idx, col_values):
 
 
 def get_cell(feuille, row_idx, col_name):
-    ws = _get_or_create_worksheet(feuille)
+    ws = _get_worksheet(feuille)
+    if ws is None:
+        return ""
     vals = _values_for(ws)
     idx = config.COL[col_name] - 1
     if row_idx - 1 < len(vals) and idx < len(vals[row_idx - 1]):
@@ -365,10 +369,10 @@ def diag():
         out["config_sample"] = sample
     except Exception as e:  # noqa: BLE001
         out["error_config"] = f"{type(e).__name__}: {e}"
-    # test d'écriture dans la feuille de repli
+    # présence de la feuille de repli (jamais créée automatiquement)
     try:
-        ws = _get_or_create_worksheet(config.FALLBACK_SHEET)
-        out["fallback_sheet_ok"] = ws.title
+        ws = _get_worksheet(config.FALLBACK_SHEET)
+        out["fallback_sheet"] = ws.title if ws else "ABSENTE (à créer manuellement)"
     except Exception as e:  # noqa: BLE001
         out["error_write"] = f"{type(e).__name__}: {e}"
     return out
@@ -376,7 +380,9 @@ def diag():
 
 def iter_prospects(feuille):
     """Génère (row_idx, dict_colonnes) pour chaque prospect d'une feuille."""
-    ws = _get_or_create_worksheet(feuille)
+    ws = _get_worksheet(feuille)
+    if ws is None:
+        return
     values = _values_for(ws)
     start = config.DATA_START_ROW  # lignes 1-3 réservées
     for i, row in enumerate(values[start - 1:], start=start):

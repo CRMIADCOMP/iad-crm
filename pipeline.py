@@ -120,11 +120,21 @@ def process_new_leads(stats):
                 feuille = config.FALLBACK_SHEET
                 iad_url = ""
 
+            # La feuille doit exister : le script ne crée JAMAIS de feuille.
+            if not sheets.worksheet_exists(feuille):
+                stats["alerts"].append(
+                    f"[ALERTA] Feuille '{feuille}' introuvable dans le Sheets — "
+                    f"vérifier l'onglet Config"
+                )
+                continue
+
             # URL utilisée dans le message (annonce IAD si dispo, sinon l'URL source)
             msg_url = iad_url or lead.get("url", "")
             lead["url"] = msg_url
 
             row_idx, is_new, _ = sheets.upsert_prospect(feuille, lead)
+            if row_idx is None:  # sécurité (feuille disparue entre-temps)
+                continue
             if is_new:
                 stats["prospects_new"] += 1
             else:
