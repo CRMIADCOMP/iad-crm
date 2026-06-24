@@ -176,6 +176,46 @@ def send_report_route():
         return jsonify({"status": "error", "message": str(e)}), 500
 
 
+@app.route("/list_biens")
+def list_biens():
+    if not _authorized(request):
+        return jsonify({"error": "unauthorized"}), 401
+    import sheets_handler
+    try:
+        sheets_handler.reset_cache()
+        return jsonify({"biens": sheets_handler.list_active_biens()})
+    except Exception as e:  # noqa: BLE001
+        return jsonify({"biens": [], "error": str(e)}), 500
+
+
+@app.route("/add_bien", methods=["POST"])
+def add_bien():
+    if not _authorized(request):
+        return jsonify({"error": "unauthorized"}), 401
+    import sheets_handler
+    data = request.get_json(silent=True) or request.form.to_dict()
+    try:
+        sheets_handler.reset_cache()
+        msg = sheets_handler.add_bien(data or {})
+        return jsonify({"status": "ok", "message": msg}), 200
+    except Exception as e:  # noqa: BLE001
+        return jsonify({"status": "error", "message": str(e)}), 400
+
+
+@app.route("/close_bien", methods=["POST"])
+def close_bien():
+    if not _authorized(request):
+        return jsonify({"error": "unauthorized"}), 401
+    import sheets_handler
+    data = request.get_json(silent=True) or request.form.to_dict()
+    try:
+        sheets_handler.reset_cache()
+        msg = sheets_handler.close_bien((data or {}).get("nom"))
+        return jsonify({"status": "ok", "message": msg}), 200
+    except Exception as e:  # noqa: BLE001
+        return jsonify({"status": "error", "message": str(e)}), 400
+
+
 @app.route("/setup_dropdowns", methods=["GET", "POST"])
 def setup_dropdowns():
     """Applique la liste déroulante Estado final + couleur sur toutes les feuilles."""
@@ -312,6 +352,13 @@ td,th{padding:7px 8px;border-bottom:1px solid var(--gray);text-align:left;}
 .sheetbtn{display:inline-block;background:var(--orange);color:#fff;text-decoration:none;padding:13px 22px;
 border-radius:8px;font-weight:bold;font-size:15px;}
 .muted{color:#999;font-size:13px;}
+.modal{display:none;position:fixed;inset:0;background:rgba(0,0,0,.5);z-index:50;}
+.modal.show{display:flex;align-items:center;justify-content:center;}
+.modalbox{background:#fff;border-radius:12px;padding:22px;width:360px;max-width:92%;}
+.modalbox h3{margin:0 0 14px;color:var(--dark);border:none;padding:0;}
+.modalbox label{font-size:12px;color:#666;display:block;margin:6px 0 2px;}
+.modalbox input,.modalbox select{width:100%;box-sizing:border-box;padding:10px;margin-bottom:6px;border:1px solid #ddd;border-radius:6px;font-size:14px;}
+.modalbtns{display:flex;gap:10px;margin-top:12px;}.modalbtns .btn{flex:1;padding:11px;}
 </style></head><body><div class="wrap">
 
 <div class="header">
@@ -364,9 +411,42 @@ border-radius:8px;font-weight:bold;font-size:15px;}
   <div id="resp"></div>
 </div>
 
+<div class="card">
+  <h3 style="border-color:var(--orange);">🏠 Gestion des biens</h3>
+  <div class="actions">
+    <button class="btn" onclick="openModal('addModal')">➕ Ajouter un nouveau bien</button>
+    <button class="btn orange" onclick="openModal('closeModal')">🏁 Marquer un bien comme vendu</button>
+  </div>
+</div>
+
 <div class="card" style="text-align:center;">
   <a class="sheetbtn" href="__SHEET_URL__" target="_blank">📊 Ouvrir Google Sheets</a>
 </div>
+
+<!-- Modal Ajouter un bien -->
+<div id="addModal" class="modal"><div class="modalbox">
+  <h3>➕ Ajouter un nouveau bien</h3>
+  <label>Nom de la feuille *</label><input id="ab_nom" placeholder="ex: T Roses 250k">
+  <label>Description *</label><input id="ab_desc" placeholder="ex: Terreno Roses 250k">
+  <label>URL Idealista</label><input id="ab_idea" placeholder="optionnel (réf auto)">
+  <label>URL Fotocasa</label><input id="ab_foto" placeholder="optionnel">
+  <label>URL Habitaclia</label><input id="ab_habi" placeholder="optionnel">
+  <label>URL IAD</label><input id="ab_iad" placeholder="optionnel">
+  <div class="modalbtns">
+    <button class="btn gray" onclick="closeModal('addModal')">Annuler</button>
+    <button class="btn" onclick="submitAddBien()">Ajouter</button>
+  </div>
+</div></div>
+
+<!-- Modal Clôturer un bien -->
+<div id="closeModal" class="modal"><div class="modalbox">
+  <h3>🏁 Marquer un bien comme vendu</h3>
+  <label>Bien actif</label><select id="cb_nom"><option>Chargement…</option></select>
+  <div class="modalbtns">
+    <button class="btn gray" onclick="closeModal('closeModal')">Annuler</button>
+    <button class="btn orange" onclick="submitCloseBien()">Marquer vendu</button>
+  </div>
+</div></div>
 
 </div>
 <script>
@@ -430,6 +510,38 @@ async function act(method,url,label){
   }catch(e){res.textContent=label+' → erreur: '+e;}
   sp.style.display='none';res.style.display='block';
   setTimeout(refreshStatus,1500);
+}
+function val(id){return document.getElementById(id).value.trim();}
+function showResult(label,j){const res=document.getElementById('result');res.style.display='block';res.textContent=label+' →\n'+JSON.stringify(j,null,2);}
+function openModal(id){document.getElementById(id).classList.add('show');if(id==='closeModal')loadBiens();}
+function closeModal(id){document.getElementById(id).classList.remove('show');}
+async function loadBiens(){
+  try{const r=await (await fetch('/list_biens')).json();
+    const sel=document.getElementById('cb_nom');
+    const biens=r.biens||[];
+    sel.innerHTML = biens.length ? biens.map(b=>'<option>'+esc(b)+'</option>').join('') : '<option value="">(aucun bien actif)</option>';
+  }catch(e){}
+}
+async function submitAddBien(){
+  const body={nom:val('ab_nom'),description:val('ab_desc'),url_idealista:val('ab_idea'),
+    url_fotocasa:val('ab_foto'),url_habitaclia:val('ab_habi'),url_iad:val('ab_iad')};
+  if(!body.nom||!body.description){alert('Nom et description obligatoires');return;}
+  const sp=document.getElementById('spin');sp.style.display='block';
+  try{const r=await fetch('/add_bien',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
+    showResult('Ajout bien',await r.json());closeModal('addModal');
+    ['ab_nom','ab_desc','ab_idea','ab_foto','ab_habi','ab_iad'].forEach(i=>document.getElementById(i).value='');
+    loadBiens();}
+  catch(e){showResult('Ajout bien',{status:'error',message:String(e)});}
+  sp.style.display='none';
+}
+async function submitCloseBien(){
+  const nom=val('cb_nom');
+  if(!nom){alert('Choisis un bien');return;}
+  const sp=document.getElementById('spin');sp.style.display='block';
+  try{const r=await fetch('/close_bien',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({nom:nom})});
+    showResult('Clôture bien',await r.json());closeModal('closeModal');loadBiens();}
+  catch(e){showResult('Clôture bien',{status:'error',message:String(e)});}
+  sp.style.display='none';
 }
 refreshStatus();
 setInterval(refreshStatus,10000);

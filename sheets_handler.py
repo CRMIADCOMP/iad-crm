@@ -5,6 +5,7 @@ Accès au Google Sheets via un compte de service (gspread).
 - Mise à jour des colonnes F/G/H d'après l'analyse IA.
 - Gestion des états (relances, clôtures).
 """
+import re
 import time
 import datetime
 
@@ -401,6 +402,109 @@ def setup_estado_validation():
         ss.batch_update({"requests": requests})
     print(f"[sheets] listes déroulantes appliquées sur {len(done)} feuilles: {done}")
     return done
+
+
+# ---------------------------------------------------------------------------
+# Gestion des biens (ajout / clôture)
+# ---------------------------------------------------------------------------
+_RE_URL_DIGITS = re.compile(r"(\d{6,})")
+BIEN_TEMPLATE = "T Ole 155k"
+
+
+def _ref_from_url(url):
+    """Extrait la référence (dernière suite de >=6 chiffres) d'une URL d'annonce."""
+    if not url:
+        return ""
+    found = _RE_URL_DIGITS.findall(url)
+    return found[-1] if found else ""
+
+
+def list_active_biens():
+    """Noms des biens actifs (col A du Config) — exclut ceux préfixés 'VEND '."""
+    out = []
+    for row in load_config_rows():
+        a = (row[0] if row else "").strip()
+        if a and not a.lower().startswith("vend "):
+            out.append(a)
+    return out
+
+
+def add_bien(data):
+    """Crée un nouveau bien : ligne Config + feuille (copie du template, vidée)."""
+    nom = (data.get("nom") or "").strip()
+    desc = (data.get("description") or "").strip()
+    if not nom or not desc:
+        raise ValueError("Nom de la feuille et description obligatoires")
+    url_idea = (data.get("url_idealista") or "").strip()
+    url_foto = (data.get("url_fotocasa") or "").strip()
+    url_habi = (data.get("url_habitaclia") or "").strip()
+    url_iad = (data.get("url_iad") or "").strip()
+
+    ss = _get_spreadsheet()
+    target = nom.strip().lower()
+    for row in load_config_rows():
+        if (row[0] if row else "").strip().lower() == target:
+            raise ValueError(f"Le bien '{nom}' existe déjà dans l'onglet Config")
+    if _get_worksheet(nom) is not None:
+        raise ValueError(f"Une feuille '{nom}' existe déjà")
+
+    template = _get_worksheet(BIEN_TEMPLATE)
+    if template is None:
+        raise ValueError(f"Feuille template '{BIEN_TEMPLATE}' introuvable")
+
+    # Duplique la feuille template puis la renomme
+    new_ws = ss.duplicate_sheet(template.id, new_sheet_name=nom)
+    # Vide les données (lignes 4+), conserve en-têtes lignes 1-3
+    _write_throttle()
+    new_ws.batch_clear([f"A{config.DATA_START_ROW}:L{new_ws.row_count}"])
+    # Titre en ligne 2 = description
+    _write_throttle()
+    new_ws.update(range_name="A2", values=[[desc]], value_input_option="USER_ENTERED")
+
+    # Ligne dans l'onglet Config
+    config_ws = _get_config_worksheet()
+    new_row = [
+        nom, desc,
+        url_idea, _ref_from_url(url_idea),
+        url_foto, _ref_from_url(url_foto),
+        url_habi, _ref_from_url(url_habi),
+        url_iad, _ref_from_url(url_iad),
+    ]
+    _write_throttle()
+    config_ws.append_row(new_row, value_input_option="USER_ENTERED")
+    reset_cache()
+    return f"Bien ajouté : {nom}"
+
+
+def close_bien(nom):
+    """Clôture un bien : renomme la feuille et le Config en 'VEND ...', vide les URLs."""
+    nom = (nom or "").strip()
+    if not nom:
+        raise ValueError("Nom du bien requis")
+    if nom.lower().startswith("vend "):
+        raise ValueError("Ce bien est déjà clôturé")
+    ws = _get_worksheet(nom)
+    if ws is None:
+        raise ValueError(f"Feuille '{nom}' introuvable")
+
+    new_title = "VEND " + nom
+    _write_throttle()
+    ws.update_title(new_title)
+
+    config_ws = _get_config_worksheet()
+    cc = config.CONFIG_COL
+    values = config_ws.get_all_values()
+    target = nom.strip().lower()
+    for i, row in enumerate(values[1:], start=2):
+        if (row[0] if row else "").strip().lower() == target:
+            _write_throttle()
+            config_ws.update_cell(i, cc["feuille"] + 1, new_title)
+            for urlcol in ("url_idealista", "url_fotocasa", "url_habitaclia", "url_iad"):
+                _write_throttle()
+                config_ws.update_cell(i, cc[urlcol] + 1, "")
+            break
+    reset_cache()
+    return f"Bien clôturé : {new_title}"
 
 
 def diag():
