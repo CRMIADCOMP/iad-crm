@@ -18,12 +18,24 @@ import json
 import datetime
 import traceback
 
+import html as _html
+
 import config
 import database as db
 import gmail_reader
 import sheets_handler as sheets
 import whatsapp
 import ai_analyzer
+import report_assets
+
+# Palette IAD
+C_DARK = "#00628C"
+C_LIGHT = "#00b1eb"
+C_ORANGE = "#E87722"
+C_GRAY_BG = "#F5F5F5"
+C_GREEN = "#28A745"
+C_RED = "#DC3545"
+C_YELLOW = "#FFC107"
 
 
 def _today():
@@ -87,11 +99,10 @@ def process_new_leads(stats):
         try:
             # Notification de réponse Idealista : pas un nouveau lead, juste au rapport.
             if lead.get("kind") == "respuesta_idealista":
-                nom = lead.get("nombre") or "?"
-                ref = lead.get("ref") or "?"
-                stats["idealista_responses"].append(
-                    f"El prospecto {nom} ha respondido en Idealista (ref: {ref})"
-                )
+                stats["idealista_responses"].append({
+                    "nombre": lead.get("nombre") or "?",
+                    "ref": lead.get("ref") or "?",
+                })
                 continue
 
             feuille, iad_url = sheets.match_lead_to_sheet(lead)
@@ -101,10 +112,11 @@ def process_new_leads(stats):
                 # Lead non matché : on l'écrit quand même dans la feuille de repli
                 # pour ne rien perdre (et pouvoir diagnostiquer).
                 stats["leads_unmatched"] += 1
-                stats["details"].append(
-                    f"⚠️ Lead non matché ({lead.get('fuente')}) -> '{config.FALLBACK_SHEET}': "
-                    f"{lead.get('telefono') or lead.get('email')} ref={lead.get('ref')}"
-                )
+                stats["unmatched"].append({
+                    "telefono": lead.get("telefono") or lead.get("email") or "?",
+                    "portail": lead.get("fuente", ""),
+                    "raison": f"Ref/URL absente de l'onglet Config (ref={lead.get('ref') or '—'})",
+                })
                 feuille = config.FALLBACK_SHEET
                 iad_url = ""
 
@@ -311,10 +323,22 @@ def process_relances_and_closures(stats):
 # ---------------------------------------------------------------------------
 # Étape 14 : rapport email
 # ---------------------------------------------------------------------------
-def send_report(stats):
-    now = datetime.datetime.now()
+def _esc(v):
+    return _html.escape(str(v if v is not None else ""))
+
+
+def _resolve_bien(ref):
+    """Tente de retrouver (feuille, url IAD) pour une réponse Idealista via la ref."""
+    try:
+        feuille, url = sheets.match_lead_to_sheet({"ref": ref, "url": ""})
+        return feuille, url
+    except Exception:  # noqa: BLE001
+        return None, None
+
+
+def _build_text_report(stats, now):
     lines = [
-        f"Rapport CRM IAD — {now.strftime('%d/%m/%Y %H:%M')} (heure serveur)"
+        f"Rapport CRM IAD — {now.strftime('%d/%m/%Y %H:%M')}"
         + ("  [DRY RUN]" if stats.get("dry_run") else ""),
         "=" * 50,
         f"Mails supprimés (corbeille) : {stats['mails_deleted']}",
@@ -323,36 +347,160 @@ def send_report(stats):
         f"Nouveaux prospects          : {stats['prospects_new']}",
         f"Prospects mis à jour        : {stats['prospects_updated']}",
         f"1ers messages WhatsApp      : {stats['wa_first_sent']}",
-        f"WhatsApp ignorés (DRY RUN)  : {stats['wa_dry_skipped']}",
         f"Relances J+2 envoyées       : {stats['relances_sent']}",
-        f"Messages 'búsqueda larga'   : {stats['wa_long_search_sent']}",
         f"Réponses traitées (IA)      : {stats['replies_processed']}",
-        f"  - réponses inconnues      : {stats['replies_unmatched']}",
         f"Clôtures 'Sin respuesta-7d' : {stats['closed_7d']}",
-        f"Échecs d'envoi WhatsApp     : {stats['wa_failed']}",
         "",
     ]
-    if stats.get("alerts"):
-        lines.append("⚠️ ALERTAS (acción requerida) :")
-        lines.extend("  " + a for a in stats["alerts"][:60])
-        lines.append("")
-    if stats.get("idealista_responses"):
-        lines.append("Respuestas en Idealista (mensajería interna) :")
-        lines.extend("  " + r for r in stats["idealista_responses"][:60])
-        lines.append("")
-    if stats["details"]:
-        lines.append("Détails :")
-        lines.extend("  " + d for d in stats["details"][:60])
-        lines.append("")
-    if stats["errors"]:
-        lines.append("Erreurs :")
-        lines.extend("  " + e for e in stats["errors"][:40])
+    for r in stats.get("idealista_responses", []):
+        lines.append(f"Respuesta Idealista: {r['nombre']} (ref {r['ref']})")
+    for a in stats.get("alerts", []):
+        lines.append(a)
+    for e in stats.get("errors", []):
+        lines.append("ERROR: " + e)
+    for u in stats.get("unmatched", []):
+        lines.append(f"No clasificado: {u['telefono']} — {u['portail']} — {u['raison']}")
+    return "\n".join(lines)
 
-    body = "\n".join(lines)
+
+def _section(title, color, inner):
+    return (
+        f'<div style="background:#fff;border-left:4px solid {color};border-radius:4px;'
+        f'padding:16px 20px;margin:0 0 18px 0;box-shadow:0 1px 2px rgba(0,0,0,0.06);">'
+        f'<h2 style="margin:0 0 12px 0;font-size:16px;color:{C_DARK};">{title}</h2>'
+        f'{inner}</div>'
+    )
+
+
+def _build_html_report(stats, now):
+    A = report_assets
+    # --- Résumé (tableau 2 colonnes) ---
+    rows = [
+        ("✅ Leads détectés", stats["leads_detected"]),
+        ("✅ Nouveaux prospects", stats["prospects_new"]),
+        ("✅ Prospects mis à jour", stats["prospects_updated"]),
+        ("✅ WhatsApp envoyés", stats["wa_first_sent"]),
+        ("✅ Relances J+2 envoyées", stats["relances_sent"]),
+        ("🗑️ Mails supprimés", stats["mails_deleted"]),
+        ("⚠️ Leads non matchés", stats["leads_unmatched"]),
+    ]
+    summary_rows = "".join(
+        f'<tr>'
+        f'<td style="padding:6px 8px;border-bottom:1px solid {C_GRAY_BG};font-size:14px;color:#333;">{lbl}</td>'
+        f'<td style="padding:6px 8px;border-bottom:1px solid {C_GRAY_BG};font-size:14px;color:{C_DARK};'
+        f'font-weight:bold;text-align:right;">{val}</td></tr>'
+        for lbl, val in rows
+    )
+    summary = _section(
+        "📊 RÉSUMÉ DU RUN", C_DARK,
+        f'<table style="width:100%;border-collapse:collapse;">{summary_rows}</table>',
+    )
+
+    parts = [summary]
+
+    # --- Réponses Idealista, groupées par bien ---
+    responses = stats.get("idealista_responses", [])
+    if responses:
+        groups = {}
+        for r in responses:
+            feuille, url = _resolve_bien(r["ref"])
+            key = feuille or f"Ref {r['ref']}"
+            groups.setdefault(key, {"url": url, "names": []})
+            groups[key]["names"].append(r["nombre"])
+        blocks = []
+        for bien, data in groups.items():
+            url = data["url"]
+            link = (f'<a href="{_esc(url)}" style="color:{C_LIGHT};">{_esc(url)}</a>'
+                    if url else '<span style="color:#999;">(annonce non liée)</span>')
+            names = "".join(
+                f'<div style="margin:2px 0 2px 16px;color:#444;font-size:13px;">'
+                f'└ {_esc(n)} a répondu</div>' for n in data["names"]
+            )
+            blocks.append(
+                f'<div style="margin:0 0 12px 0;">'
+                f'<div style="font-size:14px;color:{C_DARK};font-weight:bold;">🏠 {_esc(bien)} — {link}</div>'
+                f'{names}</div>'
+            )
+        parts.append(_section("📬 RÉPONSES IDEALISTA", C_LIGHT, "".join(blocks)))
+
+    # --- Bugs et alertes ---
+    alerts = stats.get("alerts", [])
+    errors = stats.get("errors", [])
+    if alerts or errors:
+        items = "".join(
+            f'<div style="font-size:13px;color:#444;margin:4px 0;">⚠️ {_esc(a)}</div>'
+            for a in alerts
+        ) + "".join(
+            f'<div style="font-size:13px;color:{C_RED};margin:4px 0;">❌ {_esc(e)}</div>'
+            for e in errors
+        )
+        parts.append(_section("🐛 BUGS ET ALERTES", C_ORANGE, items))
+
+    # --- Leads non classifiés ---
+    unmatched = stats.get("unmatched", [])
+    if unmatched:
+        items = "".join(
+            f'<div style="font-size:13px;color:#444;margin:4px 0;">'
+            f'<strong>{_esc(u["telefono"])}</strong> — {_esc(u["portail"])} — '
+            f'Raison : {_esc(u["raison"])}</div>'
+            for u in unmatched
+        )
+        parts.append(_section("📋 LEADS NON CLASSIFIÉS", C_RED, items))
+
+    sections_html = "".join(parts)
+    dry_badge = (f'<span style="background:{C_YELLOW};color:#333;padding:2px 8px;'
+                 f'border-radius:4px;font-size:12px;font-weight:bold;">DRY RUN</span>'
+                 if stats.get("dry_run") else "")
+
+    return f"""<!DOCTYPE html>
+<html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"></head>
+<body style="margin:0;padding:0;background:{C_GRAY_BG};font-family:Arial,Helvetica,sans-serif;">
+<table role="presentation" style="width:100%;background:{C_GRAY_BG};border-collapse:collapse;"><tr><td align="center" style="padding:24px 12px;">
+<table role="presentation" style="width:600px;max-width:100%;border-collapse:collapse;">
+
+  <!-- En-tête -->
+  <tr><td style="background:#fff;border-radius:8px 8px 0 0;padding:24px;text-align:center;">
+    <img src="{A.LOGO_DATA_URI}" width="120" alt="IAD" style="display:block;margin:0 auto 12px auto;">
+    <div style="font-size:24px;font-weight:bold;color:{C_DARK};">CRM IAD COMP</div>
+    <div style="font-size:13px;color:#888;margin-top:4px;">
+      Rapport automatique — {now.strftime('%d/%m/%Y')} à {now.strftime('%H:%M')} {dry_badge}
+    </div>
+  </td></tr>
+
+  <!-- Bouton principal -->
+  <tr><td style="background:#fff;padding:0 24px 20px 24px;text-align:center;">
+    <a href="{A.GOOGLE_SHEET_URL}" style="display:inline-block;background:{C_ORANGE};color:#fff;
+      text-decoration:none;padding:12px 22px;border-radius:6px;font-size:15px;font-weight:bold;">
+      📊 Ouvrir le tableau des acquéreurs</a>
+  </td></tr>
+
+  <!-- Sections -->
+  <tr><td style="padding:20px 24px;">{sections_html}</td></tr>
+
+  <!-- Pied de page -->
+  <tr><td style="background:{C_GRAY_BG};border-radius:0 0 8px 8px;padding:20px 24px;text-align:center;">
+    <hr style="border:none;border-top:1px solid #ddd;margin:0 0 14px 0;">
+    <div style="font-size:15px;font-weight:bold;color:{C_DARK};">El Francés Inmobiliaria</div>
+    <div style="font-size:13px;color:#555;margin-top:4px;">Thibaut MONTALAT — thibaut.montalat@iadespana.es</div>
+    <div style="font-size:11px;color:#999;margin-top:8px;">Ce rapport est généré automatiquement par votre CRM IAD</div>
+  </td></tr>
+
+</table></td></tr></table></body></html>"""
+
+
+def send_report(stats):
+    now = datetime.datetime.now()
+    text_body = _build_text_report(stats, now)
+    subject = "Rapport CRM IAD" + (" [DRY RUN]" if stats.get("dry_run") else "")
     try:
-        gmail_reader.send_email(config.REPORT_EMAIL, "Rapport CRM IAD", body)
+        html_body = _build_html_report(stats, now)
     except Exception as e:  # noqa: BLE001
-        print(f"[report] envoi email échoué: {e}\n{body}")
+        print(f"[report] construction HTML échouée: {e}")
+        html_body = None
+    try:
+        gmail_reader.send_email(config.REPORT_EMAIL, subject, text_body, html_body=html_body)
+    except Exception as e:  # noqa: BLE001
+        print(f"[report] envoi email échoué: {e}\n{text_body}")
 
 
 # ---------------------------------------------------------------------------
@@ -371,6 +519,7 @@ def run(dry_run=False, full_scan=False):
         "relances_sent": 0, "closed_7d": 0,
         "replies_processed": 0, "replies_unmatched": 0,
         "details": [], "errors": [], "idealista_responses": [], "alerts": [],
+        "unmatched": [],
     }
     sheets.reset_cache()
     print(f"[pipeline] démarrage {datetime.datetime.now().isoformat()} "
@@ -385,6 +534,11 @@ def run(dry_run=False, full_scan=False):
     send_report(stats)
     db.set_last_run_ts(started)
     db.set_last_reply_check_ts(started)
+    # Enrichit les réponses Idealista avec le bien + URL (pour le dashboard)
+    for r in stats.get("idealista_responses", []):
+        bien, url = _resolve_bien(r.get("ref", ""))
+        r["bien"] = bien or f"Ref {r.get('ref', '')}"
+        r["url"] = url or ""
     # Stocke un résumé du dernier run (consultable via /status, sans email)
     summary = {k: v for k, v in stats.items() if k not in ("details", "errors")}
     summary["details"] = stats["details"][:30]
