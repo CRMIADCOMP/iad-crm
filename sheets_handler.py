@@ -92,12 +92,17 @@ def _get_config_worksheet():
 
 
 def load_config_rows():
-    """Renvoie les lignes de l'onglet Config (sans l'en-tête), mises en cache."""
+    """
+    Renvoie les lignes de l'onglet Config (sans l'en-tête), mises en cache.
+    Toutes les cellules sont forcées en chaîne (str) : les refs stockées comme
+    nombres entiers (ex. 926287) doivent comparer comme "926287".
+    """
     global _config_rows
     if _config_rows is None:
         ws = _get_config_worksheet()
         rows = _values_for(ws)
-        _config_rows = rows[1:] if rows else []
+        data = rows[1:] if rows else []
+        _config_rows = [[str(c) for c in row] for row in data]
     return _config_rows
 
 
