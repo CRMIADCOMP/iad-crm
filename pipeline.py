@@ -14,6 +14,7 @@ Orchestration du pipeline CRM (exécuté à 8h, 12h, 18h heure Madrid).
  14   Rapport par email
 """
 import time
+import json
 import datetime
 import traceback
 
@@ -72,13 +73,18 @@ def process_new_leads(stats):
     for lead in leads:
         try:
             feuille, iad_url = sheets.match_lead_to_sheet(lead)
-            if not feuille:
+            matched = bool(feuille)
+
+            if not matched:
+                # Lead non matché : on l'écrit quand même dans la feuille de repli
+                # pour ne rien perdre (et pouvoir diagnostiquer).
                 stats["leads_unmatched"] += 1
                 stats["details"].append(
-                    f"⚠️ Lead non matché ({lead.get('fuente')}): "
+                    f"⚠️ Lead non matché ({lead.get('fuente')}) -> '{config.FALLBACK_SHEET}': "
                     f"{lead.get('telefono') or lead.get('email')} ref={lead.get('ref')}"
                 )
-                continue
+                feuille = config.FALLBACK_SHEET
+                iad_url = ""
 
             # URL utilisée dans le message (annonce IAD si dispo, sinon l'URL source)
             msg_url = iad_url or lead.get("url", "")
@@ -89,6 +95,14 @@ def process_new_leads(stats):
                 stats["prospects_new"] += 1
             else:
                 stats["prospects_updated"] += 1
+
+            # On n'envoie pas de WhatsApp pour un lead non matché (sauf override),
+            # car le message référence l'annonce et on n'a pas d'URL fiable.
+            if not matched and not config.SEND_WHATSAPP_WHEN_UNMATCHED:
+                # marque l'état pour l'exclure des relances/clôtures automatiques
+                if is_new:
+                    sheets.update_cells(feuille, row_idx, {"estado_final": "Sin clasificar"})
+                continue
 
             # Étape 7 : envoi du 1er message si l'état l'autorise
             estado = sheets.get_cell(feuille, row_idx, "estado_final").strip()
@@ -288,7 +302,17 @@ def run():
     send_report(stats)
     db.set_last_run_ts(started)
     db.set_last_reply_check_ts(started)
-    print(f"[pipeline] terminé en {time.time() - started:.1f}s — {stats}")
+    # Stocke un résumé du dernier run (consultable via /status, sans email)
+    summary = {k: v for k, v in stats.items() if k not in ("details", "errors")}
+    summary["details"] = stats["details"][:30]
+    summary["errors"] = stats["errors"][:20]
+    summary["finished_at"] = datetime.datetime.now().isoformat()
+    summary["duration_s"] = round(time.time() - started, 1)
+    try:
+        db.set_state("last_run_stats", json.dumps(summary, ensure_ascii=False))
+    except Exception:  # noqa: BLE001
+        pass
+    print(f"[pipeline] terminé en {time.time() - started:.1f}s — {summary}")
     return stats
 
 

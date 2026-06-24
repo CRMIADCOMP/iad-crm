@@ -92,6 +92,11 @@ CONFIG_COL = {
 # États autorisant l'envoi d'un nouveau message
 SENDABLE_STATES = {"", "Nuevo contacto", "WhatsApp enviado"}
 FALLBACK_NAME = "vecino/a"
+# Feuille de repli : les leads non matchés à l'onglet Config y sont écrits
+# (au lieu d'être perdus). Aucun WhatsApp n'est envoyé pour ces leads.
+FALLBACK_SHEET = os.environ.get("FALLBACK_SHEET", "Leads sin clasificar")
+# Envoyer un WhatsApp même sans annonce matchée ? (déconseillé : message sans URL)
+SEND_WHATSAPP_WHEN_UNMATCHED = os.environ.get("SEND_WHATSAPP_WHEN_UNMATCHED", "0") == "1"
 RELANCE_DELAY_DAYS = 2          # relance J+2
 NO_REPLY_CLOSE_DAYS = 7         # passage en "Sin respuesta - 7d"
 LONG_SEARCH_THRESHOLD_MONTHS = 12  # > 1 an => message spécial

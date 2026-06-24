@@ -40,10 +40,25 @@ def _get_spreadsheet():
 # ---------------------------------------------------------------------------
 # Onglet Config : matching annonce -> feuille
 # ---------------------------------------------------------------------------
+def _get_config_worksheet():
+    """
+    Renvoie l'onglet Config. Tolérant au nom exact (emoji/espaces) :
+    essaie le nom configuré, sinon le premier onglet contenant 'config'.
+    """
+    ss = _get_spreadsheet()
+    try:
+        return ss.worksheet(config.CONFIG_SHEET_NAME)
+    except gspread.WorksheetNotFound:
+        for ws in ss.worksheets():
+            if "config" in ws.title.lower():
+                print(f"[config] onglet Config trouvé par tolérance: '{ws.title}'")
+                return ws
+        raise
+
+
 def load_config_rows():
     """Renvoie les lignes de l'onglet Config (sans l'en-tête)."""
-    ss = _get_spreadsheet()
-    ws = ss.worksheet(config.CONFIG_SHEET_NAME)
+    ws = _get_config_worksheet()
     rows = ws.get_all_values()
     return rows[1:] if rows else []
 
@@ -239,14 +254,50 @@ def get_cell(feuille, row_idx, col_name):
 
 
 def list_all_prospect_sheets():
-    """Noms de toutes les feuilles de prospects (exclut l'onglet Config)."""
+    """Noms de toutes les feuilles de prospects (exclut tout onglet 'Config')."""
     ss = _get_spreadsheet()
     names = []
     for ws in ss.worksheets():
-        if ws.title == config.CONFIG_SHEET_NAME:
+        if ws.title == config.CONFIG_SHEET_NAME or "config" in ws.title.lower():
             continue
         names.append(ws.title)
     return names
+
+
+def diag():
+    """Diagnostic : vérifie l'accès au Sheets et résume le contenu."""
+    out = {}
+    try:
+        ss = _get_spreadsheet()
+        out["spreadsheet_title"] = ss.title
+        out["worksheets"] = [ws.title for ws in ss.worksheets()]
+    except Exception as e:  # noqa: BLE001
+        out["error_spreadsheet"] = f"{type(e).__name__}: {e}"
+        return out
+    try:
+        rows = load_config_rows()
+        out["config_rows"] = len(rows)
+        cc = config.CONFIG_COL
+        sample = []
+        for row in rows[:10]:
+            def cell(idx):
+                return row[idx] if idx < len(row) else ""
+            sample.append({
+                "feuille": cell(cc["feuille"]).strip(),
+                "ref_idealista": cell(cc["ref_idealista"]).strip(),
+                "ref_fotocasa": cell(cc["ref_fotocasa"]).strip(),
+                "ref_habitaclia": cell(cc["ref_habitaclia"]).strip(),
+            })
+        out["config_sample"] = sample
+    except Exception as e:  # noqa: BLE001
+        out["error_config"] = f"{type(e).__name__}: {e}"
+    # test d'écriture dans la feuille de repli
+    try:
+        ws = _get_or_create_worksheet(config.FALLBACK_SHEET)
+        out["fallback_sheet_ok"] = ws.title
+    except Exception as e:  # noqa: BLE001
+        out["error_write"] = f"{type(e).__name__}: {e}"
+    return out
 
 
 def iter_prospects(feuille):

@@ -122,9 +122,50 @@ apparaît dans les logs Railway et le message est stocké en base.
 - Envoi bloqué si `Estado final` ∉ {vide, `Nuevo contacto`, `WhatsApp enviado`}.
 - Nom vide → `vecino/a`.
 - Déduplication par **téléphone ET email** avant toute insertion.
-- L'URL de l'annonce est stockée en colonne **E (Notas)** pour réutilisation lors des relances.
+- Le **message du prospect** est stocké en colonne **E (Notas)** ; l'URL des relances est relue
+  depuis l'onglet Config (colonne I de la feuille correspondante).
 - L'extraction des leads (`gmail_reader.py`) repose sur des regex génériques : si le format
   exact des emails Idealista/Fotocasa/Habitaclia diffère, ajuste les motifs `RE_*` en haut du fichier.
 - SQLite (`crm.db`) est local au conteneur Railway. Le redéploiement le réinitialise ; pour
   une persistance durable, ajoute un **Volume** Railway monté sur le dossier et pointe
   `DB_PATH` dessus (ex. `/data/crm.db`).
+
+---
+
+## Débogage : « aucune ligne ne s'ajoute »
+
+Ouvre ces URLs dans ton navigateur (remplace `<domaine>` par ton domaine Railway) :
+
+1. **`https://<domaine>/diag`** — vérifie tout :
+   - `env` : les variables d'env présentes (true/false).
+   - `gmail` : la requête utilisée, le **nombre de mails trouvés** (`matched_messages`) et un échantillon (expéditeur + sujet).
+   - `sheets` : titre du classeur, liste des onglets, nombre de lignes du Config, échantillon de refs, et test d'écriture (`fallback_sheet_ok`).
+2. **`https://<domaine>/run`** — déclenche le pipeline maintenant (ne pas attendre 8h/12h/18h).
+3. **`https://<domaine>/status`** (~30 s après) — résumé du dernier run (leads détectés, écrits, non matchés, erreurs).
+
+Lecture des résultats `/diag` :
+
+- `gmail.matched_messages = 0` → la requête ne trouve rien : mauvais expéditeur dans
+  `PORTAL_SENDERS`, aucun mail dans les dernières 24 h, ou label INBOX vide.
+- `gmail.error_auth` → `GMAIL_TOKEN` / `GMAIL_CREDENTIALS` manquants ou token périmé
+  (régénère `token.json` avec `setup_auth.py` : le scope d'envoi a été ajouté).
+- `sheets.error_spreadsheet` → le compte de service n'a pas accès : partage le Sheet en
+  **Éditeur** avec l'email du service account, ou `GOOGLE_SERVICE_ACCOUNT` est absent/mal encodé.
+- `sheets.error_write` → API Sheets/Drive non activée, ou partage manquant.
+
+### Feuille de repli (changement important)
+
+Les leads qui **ne matchent pas** l'onglet Config ne sont plus perdus : ils sont écrits dans
+la feuille **`Leads sin clasificar`** avec l'état `Sin clasificar` (aucun WhatsApp envoyé,
+car le message a besoin de l'URL de l'annonce). C'est souvent la cause du « zéro ligne » :
+les mails Idealista n'ont ni URL ni référence dans le corps, donc le matching échouait et le
+lead était ignoré. Désormais tu verras au minimum les leads arriver dans cette feuille — preuve
+que Gmail + écriture Sheets fonctionnent — puis tu pourras corriger les refs du Config.
+
+Pour forcer l'envoi WhatsApp même sans match : variable Railway `SEND_WHATSAPP_WHEN_UNMATCHED=1`
+(déconseillé, le message contiendra une URL vide).
+
+### Endpoints disponibles
+
+`/` état, `/health` statut + dernier run, `/status` résumé détaillé, `/diag` diagnostic complet,
+`/run` déclenchement manuel, `/webhook` réception WhatsApp.

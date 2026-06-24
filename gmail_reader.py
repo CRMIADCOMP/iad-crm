@@ -301,6 +301,34 @@ def _extract_lead(source, body, sender_email):
     }
 
 
+def diag():
+    """Diagnostic Gmail : vérifie l'auth et compte les mails correspondant à la requête."""
+    out = {}
+    try:
+        service = _get_service()
+    except Exception as e:  # noqa: BLE001
+        out["error_auth"] = f"{type(e).__name__}: {e}"
+        return out
+    senders = " OR ".join(config.PORTAL_SENDERS.keys())
+    query = f"label:INBOX newer_than:1d from:({senders})"
+    out["query"] = query
+    try:
+        resp = service.users().messages().list(userId="me", q=query, maxResults=20).execute()
+        ids = resp.get("messages", [])
+        out["matched_messages"] = len(ids)
+        subjects = []
+        for ref in ids[:5]:
+            msg = service.users().messages().get(
+                userId="me", id=ref["id"], format="metadata",
+                metadataHeaders=["Subject", "From"]).execute()
+            hdr = {h["name"].lower(): h["value"] for h in msg["payload"].get("headers", [])}
+            subjects.append({"from": hdr.get("from", ""), "subject": hdr.get("subject", "")})
+        out["sample"] = subjects
+    except Exception as e:  # noqa: BLE001
+        out["error_query"] = f"{type(e).__name__}: {e}"
+    return out
+
+
 def fetch_new_leads(after_ts):
     """
     Renvoie la liste des leads détectés dans les emails reçus après `after_ts`

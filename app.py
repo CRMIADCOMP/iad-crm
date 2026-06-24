@@ -6,6 +6,7 @@ Application Flask principale — tourne 24h/24 sur Railway.
 - Expose /health (statut) et /run (déclenchement manuel sécurisé du pipeline).
 """
 import os
+import json
 import threading
 
 from flask import Flask, jsonify, request
@@ -79,7 +80,45 @@ def manual_run():
     if token and request.args.get("token") != token:
         return jsonify({"error": "unauthorized"}), 401
     _run_pipeline_async()
-    return jsonify({"status": "pipeline_started"}), 202
+    return jsonify({"status": "pipeline_started",
+                    "note": "Voir /status dans ~30s pour le résumé"}), 202
+
+
+@app.route("/status")
+def status():
+    """Résumé du dernier run (sans dépendre de l'email)."""
+    raw = db.get_state("last_run_stats")
+    last = json.loads(raw) if raw else None
+    return jsonify({"last_run_ts": db.get_last_run_ts(), "last_run": last})
+
+
+@app.route("/diag")
+def diag():
+    """
+    Diagnostic complet : variables d'env, accès Gmail, accès Sheets.
+    À ouvrir dans le navigateur pour voir pourquoi rien ne s'ajoute.
+    """
+    import gmail_reader
+    import sheets_handler
+    out = {
+        "env": {
+            "GMAIL_CREDENTIALS": bool(os.environ.get("GMAIL_CREDENTIALS")),
+            "GMAIL_TOKEN": bool(os.environ.get("GMAIL_TOKEN")),
+            "GOOGLE_SERVICE_ACCOUNT": bool(os.environ.get("GOOGLE_SERVICE_ACCOUNT")),
+            "ANTHROPIC_API_KEY": bool(os.environ.get("ANTHROPIC_API_KEY")),
+            "ULTRAMSG_INSTANCE": config.ULTRAMSG_INSTANCE,
+            "portal_senders": list(config.PORTAL_SENDERS.keys()),
+        },
+    }
+    try:
+        out["gmail"] = gmail_reader.diag()
+    except Exception as e:  # noqa: BLE001
+        out["gmail"] = {"error": f"{type(e).__name__}: {e}"}
+    try:
+        out["sheets"] = sheets_handler.diag()
+    except Exception as e:  # noqa: BLE001
+        out["sheets"] = {"error": f"{type(e).__name__}: {e}"}
+    return jsonify(out)
 
 
 if __name__ == "__main__":
