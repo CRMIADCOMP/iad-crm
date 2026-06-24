@@ -18,6 +18,8 @@ import json
 import datetime
 import traceback
 
+import os
+import socket
 import html as _html
 
 import config
@@ -533,7 +535,8 @@ def run(dry_run=False, full_scan=False):
     }
     sheets.reset_cache()
     print(f"[pipeline] démarrage {datetime.datetime.now().isoformat()} "
-          f"(dry_run={dry_run}, full_scan={full_scan})")
+          f"(dry_run={dry_run}, full_scan={full_scan}) "
+          f"pid={os.getpid()} host={socket.gethostname()}")
     try:
         process_new_leads(stats)
         process_replies(stats)

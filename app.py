@@ -7,6 +7,7 @@ Application Flask principale — tourne 24h/24 sur Railway.
 """
 import os
 import json
+import socket
 import datetime
 import threading
 
@@ -28,6 +29,11 @@ app.secret_key = os.environ.get(
 app.register_blueprint(webhook_bp)
 
 db.init_db()
+
+# Log d'instance : permet de repérer dans les logs Railway si PLUSIEURS instances
+# tournent (chaque instance affichera un pid/hostname différent au démarrage).
+print(f"[boot] instance démarrée — pid={os.getpid()} host={socket.gethostname()} "
+      f"db={config.DB_PATH}")
 
 DASHBOARD_PASSWORD = os.environ.get("DASHBOARD_PASSWORD", "iad-crm")
 
