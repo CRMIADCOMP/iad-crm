@@ -110,6 +110,23 @@ def _ref_norm(value):
     return "".join(ch for ch in str(value).lower() if ch.isalnum())
 
 
+def _pick_url(row):
+    """
+    Sélectionne UNE URL pour le bien, par ordre de priorité :
+    C (Idealista) -> E (Fotocasa) -> G (Habitaclia) -> I (IAD).
+    Une cellule est "vide" si None, "" ou ne commence pas par http.
+    Renvoie "" si aucune URL valide.
+    """
+    cc = config.CONFIG_COL
+    def cell(idx):
+        return row[idx] if idx < len(row) else ""
+    for key in ("url_idealista", "url_fotocasa", "url_habitaclia", "url_iad"):
+        v = (cell(cc[key]) or "").strip()
+        if v.lower().startswith("http"):
+            return v
+    return ""
+
+
 _config_logged = False
 
 
@@ -172,14 +189,14 @@ def match_lead_to_sheet(lead):
                 u = u.strip().lower()
                 if u and (u in lead_url or lead_url in u):
                     print(f"[match]   ✅ match URL -> feuille='{feuille}'")
-                    return feuille, cell(cc["url_iad"]).strip()
+                    return feuille, _pick_url(row)
 
         # match par référence
         if lead_ref:
             for r in refs:
                 if r and _ref_norm(r) == lead_ref:
                     print(f"[match]   ✅ match REF -> feuille='{feuille}'")
-                    return feuille, cell(cc["url_iad"]).strip()
+                    return feuille, _pick_url(row)
 
     print(f"[match]   ❌ aucun match pour ref='{lead_ref}' url='{lead_url}'")
     return None, None
@@ -189,13 +206,13 @@ def match_lead_to_sheet(lead):
 # Feuilles prospects
 # ---------------------------------------------------------------------------
 def get_iad_url_for_sheet(feuille):
-    """Renvoie l'URL IAD (col I de Config) associée à une feuille, pour les relances."""
+    """Renvoie l'URL du bien (priorité C->E->G->I) pour une feuille, pour les relances."""
     cc = config.CONFIG_COL
+    target = (feuille or "").strip().lower()
     for row in load_config_rows():
-        def cell(idx):
-            return row[idx] if idx < len(row) else ""
-        if cell(cc["feuille"]).strip() == feuille:
-            return cell(cc["url_iad"]).strip()
+        feuille_cfg = (row[cc["feuille"]] if cc["feuille"] < len(row) else "").strip().lower()
+        if feuille_cfg == target:
+            return _pick_url(row)
     return ""
 
 
