@@ -2,11 +2,19 @@
 Envoi de messages WhatsApp via UltraMsg + templates de messages (espagnol).
 Chaque prospect reçoit UN message individuel. Jamais de message groupé.
 """
+import re
 import random
 import requests
 
 import config
 from database import normalize_phone
+
+# Fragments typiques d'un SUJET de mail (jamais un vrai nom de prospect)
+_SUBJECT_MARKERS = (
+    "sobre tu inmueble", "nuevo mensaje", "contacto para", "con ref",
+    "referencia", "respuesta de", "en compra", "en venta", "de fotocasa",
+    "de habitaclia", "de idealista", "llamada", "anuncio",
+)
 
 # ---------------------------------------------------------------------------
 # Templates
@@ -39,8 +47,29 @@ LONG_SEARCH_MESSAGE = (
 
 
 def _name_or_fallback(nombre):
-    nombre = (nombre or "").strip()
-    return nombre if nombre else config.FALLBACK_NAME
+    """
+    Nettoie le nom avant injection dans le message WhatsApp.
+    Ne renvoie JAMAIS un sujet de mail : si le nom est vide, suspect, trop long
+    ou ressemble à un sujet/URL/email, on retombe sur 'vecino/a'.
+    """
+    name = (nombre or "").strip()
+    if not name:
+        return config.FALLBACK_NAME
+    # coupe sur séparateurs (garde la partie nom)
+    name = re.split(r"[\n,;:|/]", name)[0]
+    name = re.sub(r"\s+", " ", name).strip(" .,-—·\t")
+    if not name:
+        return config.FALLBACK_NAME
+    low = name.lower()
+    # rejette emails, URLs, fragments de sujet, chiffres
+    if "@" in name or "http" in low or any(ch.isdigit() for ch in name):
+        return config.FALLBACK_NAME
+    if any(marker in low for marker in _SUBJECT_MARKERS):
+        return config.FALLBACK_NAME
+    # un vrai nom = au plus 4 mots et pas trop long
+    if len(name) > 40 or len(name.split()) > 4:
+        return config.FALLBACK_NAME
+    return name
 
 
 def build_first_contact(nombre, url):
