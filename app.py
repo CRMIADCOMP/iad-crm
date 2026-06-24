@@ -385,7 +385,10 @@ setInterval(refreshStatus,10000);
 def login():
     error = ""
     if request.method == "POST":
-        if request.form.get("password") == DASHBOARD_PASSWORD:
+        print(f"[login] tentative mot de passe, DASHBOARD_PASSWORD défini: "
+              f"{bool(os.environ.get('DASHBOARD_PASSWORD'))}")
+        # .strip() : évite les échecs dus à un espace/retour-ligne dans la variable Railway
+        if (request.form.get("password") or "").strip() == (DASHBOARD_PASSWORD or "").strip():
             session["auth"] = True
             return redirect("/dashboard")
         error = '<div class="err">Mot de passe incorrect</div>'
