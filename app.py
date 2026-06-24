@@ -350,7 +350,9 @@ td,th{padding:7px 8px;border-bottom:1px solid var(--gray);text-align:left;}
 .bien{font-weight:bold;color:var(--dark);font-size:14px;margin-top:8px;}
 .bien a{color:var(--light);} .resp{margin-left:14px;color:#555;font-size:13px;}
 .sheetbtn{display:inline-block;background:var(--orange);color:#fff;text-decoration:none;padding:13px 22px;
-border-radius:8px;font-weight:bold;font-size:15px;}
+border-radius:8px;font-weight:bold;font-size:15px;margin:6px;}
+.extbtn{display:inline-block;background:#fff;border:2px solid var(--dark);color:var(--dark);
+text-decoration:none;padding:11px 18px;border-radius:8px;font-weight:bold;font-size:14px;margin:6px;}
 .muted{color:#999;font-size:13px;}
 .modal{display:none;position:fixed;inset:0;background:rgba(0,0,0,.5);z-index:50;}
 .modal.show{display:flex;align-items:center;justify-content:center;}
@@ -378,13 +380,8 @@ border-radius:8px;font-weight:bold;font-size:15px;}
   <h3>⚡ Actions rapides</h3>
   <div class="actions">
     <button class="btn" onclick="act('POST','/run','Lancer le pipeline')">▶️ Lancer le pipeline</button>
-    <button class="btn light" onclick="act('GET','/run?dry_run=true','Simulation')">🔍 Simulation (dry run)</button>
     <button class="btn" onclick="act('GET','/full_scan','Scan complet 30j')">🔄 Scan complet 30 jours</button>
-    <button class="btn light" onclick="act('GET','/full_scan?dry_run=true','Scan complet simulation')">🔄 Scan complet (simulation)</button>
-    <button class="btn orange" onclick="act('POST','/reset_timestamp','Reset timestamp')">🔁 Reset timestamp</button>
-    <button class="btn gray" onclick="act('GET','/diag','Diagnostic')">🔍 Diagnostic complet</button>
     <button class="btn" onclick="act('POST','/send_report','Envoi du rapport')">📧 Générer et envoyer le rapport</button>
-    <button class="btn light" onclick="act('POST','/test_email','Test email')">✉️ Test email minimal</button>
     <button class="btn gray" onclick="act('POST','/setup_dropdowns','Listes déroulantes')">🔧 Configurer listes déroulantes (1 fois)</button>
   </div>
   <div class="spinner" id="spin"></div>
@@ -420,7 +417,23 @@ border-radius:8px;font-weight:bold;font-size:15px;}
 </div>
 
 <div class="card" style="text-align:center;">
+  <h3 style="border:none;padding:0;text-align:center;">🔗 Liens rapides</h3>
   <a class="sheetbtn" href="__SHEET_URL__" target="_blank">📊 Ouvrir Google Sheets</a>
+  <a class="extbtn" href="https://www.idealista.com/tools/listadooffice?Agent=39869786&ItemsPerPage=20&CurrentPage=1&OrderedBy=activationdateCol&OrderedType=DESC" target="_blank">🏠 Ma page Idealista ↗</a>
+  <a class="extbtn" href="https://www.iadespana.es/agente-inmobiliario/thibaut.montalat" target="_blank">👤 Ma page IAD ↗</a>
+</div>
+
+<!-- Tests & Simulation (bas de page) -->
+<div class="card" style="background:var(--gray);border:1px solid var(--orange);">
+  <h3 style="border-color:var(--orange);">🧪 Tests &amp; Simulation</h3>
+  <div class="actions">
+    <button class="btn light" onclick="act('GET','/run?dry_run=true','Simulation (dry run)')">🔍 Simulation (dry run)</button>
+    <button class="btn light" onclick="act('GET','/full_scan?dry_run=true','Scan complet simulation')">🔄 Scan complet en simulation</button>
+    <button class="btn light" onclick="act('POST','/send_report','Test email')">📧 Test email minimal</button>
+    <button class="btn orange" onclick="act('POST','/reset_timestamp','Reset timestamp')">🔁 Reset timestamp</button>
+    <button class="btn gray" onclick="act('GET','/diag','Diagnostic complet')">🔍 Diagnostic complet</button>
+  </div>
+  <p style="font-size:12px;color:#9a6b00;margin:12px 0 0;">⚠️ Ces actions sont réservées aux tests — ne pas utiliser en production courante</p>
 </div>
 
 <!-- Modal Ajouter un bien -->
