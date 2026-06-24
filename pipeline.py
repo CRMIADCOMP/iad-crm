@@ -127,6 +127,11 @@ def process_new_leads(stats):
                 stats["details"].append(f"⚠️ Pas de téléphone pour {lead.get('email')} ({feuille})")
                 continue
 
+            if stats.get("dry_run"):
+                print(f"[DRY RUN] whatsapp ignoré pour {phone} (primer contacto, {feuille})")
+                stats["wa_dry_skipped"] += 1
+                continue
+
             body = whatsapp.build_first_contact(lead.get("nombre", ""), msg_url)
             ok, info = whatsapp.send_message(phone, body)
             today = _today().isoformat()
@@ -186,6 +191,11 @@ def process_replies(stats):
             # Étape 11 : recherche > 1 an -> message doux spécial
             meses = analysis.get("tiempo_busqueda_meses", 0)
             if meses and meses > config.LONG_SEARCH_THRESHOLD_MONTHS:
+                if stats.get("dry_run"):
+                    print(f"[DRY RUN] whatsapp ignoré pour {phone} (búsqueda larga)")
+                    stats["wa_dry_skipped"] += 1
+                    db.mark_processed(ids)
+                    continue
                 body = whatsapp.build_long_search(p.get("nombre", ""))
                 ok, info = whatsapp.send_message(phone, body)
                 if ok:
@@ -234,7 +244,11 @@ def process_relances_and_closures(stats):
 
                 # Relance J+2 (une seule fois)
                 if days >= config.RELANCE_DELAY_DAYS and not (p.get("relance_j2") or "").strip():
-                    # URL de l'annonce relue depuis l'onglet Config (Notas contient le message)
+                    if stats.get("dry_run"):
+                        print(f"[DRY RUN] whatsapp ignoré pour {phone} (relance J+2)")
+                        stats["wa_dry_skipped"] += 1
+                        continue
+                    # URL de l'annonce relue depuis l'onglet Config
                     url = sheets.get_iad_url_for_sheet(feuille)
                     body = whatsapp.build_relance(p.get("nombre", ""), url)
                     ok, info = whatsapp.send_message(phone, body)
@@ -256,13 +270,15 @@ def process_relances_and_closures(stats):
 def send_report(stats):
     now = datetime.datetime.now()
     lines = [
-        f"Rapport CRM IAD — {now.strftime('%d/%m/%Y %H:%M')} (heure serveur)",
+        f"Rapport CRM IAD — {now.strftime('%d/%m/%Y %H:%M')} (heure serveur)"
+        + ("  [DRY RUN]" if stats.get("dry_run") else ""),
         "=" * 50,
         f"Leads détectés (Gmail)      : {stats['leads_detected']}",
         f"  - non matchés Config      : {stats['leads_unmatched']}",
         f"Nouveaux prospects          : {stats['prospects_new']}",
         f"Prospects mis à jour        : {stats['prospects_updated']}",
         f"1ers messages WhatsApp      : {stats['wa_first_sent']}",
+        f"WhatsApp ignorés (DRY RUN)  : {stats['wa_dry_skipped']}",
         f"Relances J+2 envoyées       : {stats['relances_sent']}",
         f"Messages 'búsqueda larga'   : {stats['wa_long_search_sent']}",
         f"Réponses traitées (IA)      : {stats['replies_processed']}",
@@ -293,19 +309,21 @@ def send_report(stats):
 # ---------------------------------------------------------------------------
 # Point d'entrée du pipeline
 # ---------------------------------------------------------------------------
-def run():
+def run(dry_run=False):
     db.init_db()
     started = time.time()
     stats = {
+        "dry_run": bool(dry_run),
         "leads_detected": 0, "leads_unmatched": 0,
         "prospects_new": 0, "prospects_updated": 0,
         "wa_first_sent": 0, "wa_failed": 0, "wa_long_search_sent": 0,
+        "wa_dry_skipped": 0,
         "relances_sent": 0, "closed_7d": 0,
         "replies_processed": 0, "replies_unmatched": 0,
         "details": [], "errors": [], "idealista_responses": [],
     }
     sheets.reset_cache()
-    print(f"[pipeline] démarrage {datetime.datetime.now().isoformat()}")
+    print(f"[pipeline] démarrage {datetime.datetime.now().isoformat()} (dry_run={dry_run})")
     try:
         process_new_leads(stats)
         process_replies(stats)

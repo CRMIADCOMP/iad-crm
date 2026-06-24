@@ -25,9 +25,9 @@ app.register_blueprint(webhook_bp)
 db.init_db()
 
 
-def _run_pipeline_async():
+def _run_pipeline_async(dry_run=False):
     """Lance le pipeline dans un thread pour ne pas bloquer le scheduler/Flask."""
-    threading.Thread(target=pipeline.run, daemon=True).start()
+    threading.Thread(target=pipeline.run, kwargs={"dry_run": dry_run}, daemon=True).start()
 
 
 # ---------------------------------------------------------------------------
@@ -79,8 +79,9 @@ def manual_run():
     token = os.environ.get("RUN_TOKEN")
     if token and request.args.get("token") != token:
         return jsonify({"error": "unauthorized"}), 401
-    _run_pipeline_async()
-    return jsonify({"status": "pipeline_started",
+    dry_run = request.args.get("dry_run", "").lower() in ("1", "true", "yes")
+    _run_pipeline_async(dry_run=dry_run)
+    return jsonify({"status": "pipeline_started", "dry_run": dry_run,
                     "note": "Voir /status dans ~30s pour le résumé"}), 202
 
 
