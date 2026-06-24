@@ -159,6 +159,23 @@ def reset_timestamp():
                     "note": "Lance /run pour retraiter les mails des dernières 24h"}), 200
 
 
+@app.route("/send_report", methods=["GET", "POST"])
+def send_report_route():
+    """Envoie immédiatement le rapport email du dernier run."""
+    if not _authorized(request):
+        return jsonify({"error": "unauthorized"}), 401
+    raw = db.get_state("last_run_stats")
+    if not raw:
+        return jsonify({"status": "error",
+                        "message": "Aucun run disponible — lance d'abord le pipeline"}), 400
+    try:
+        stats = json.loads(raw)
+        ok, message = pipeline.send_report(stats)
+        return jsonify({"status": "ok" if ok else "error", "message": message}), (200 if ok else 500)
+    except Exception as e:  # noqa: BLE001
+        return jsonify({"status": "error", "message": str(e)}), 500
+
+
 @app.route("/status")
 def status():
     """Résumé du dernier run (sans dépendre de l'email)."""
@@ -290,6 +307,7 @@ border-radius:8px;font-weight:bold;font-size:15px;}
     <button class="btn light" onclick="act('GET','/full_scan?dry_run=true','Scan complet simulation')">🔄 Scan complet (simulation)</button>
     <button class="btn orange" onclick="act('POST','/reset_timestamp','Reset timestamp')">🔁 Reset timestamp</button>
     <button class="btn gray" onclick="act('GET','/diag','Diagnostic')">🔍 Diagnostic complet</button>
+    <button class="btn" onclick="act('POST','/send_report','Envoi du rapport')">📧 Générer et envoyer le rapport</button>
   </div>
   <div class="spinner" id="spin"></div>
   <pre id="result" style="display:none;"></pre>

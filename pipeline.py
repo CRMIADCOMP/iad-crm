@@ -501,6 +501,7 @@ def _build_html_report(stats, now):
 
 
 def send_report(stats):
+    """Construit et envoie le rapport. Renvoie (ok: bool, message: str)."""
     now = datetime.datetime.now()
     text_body = _build_text_report(stats, now)
     subject = "Rapport CRM IAD" + (" [DRY RUN]" if stats.get("dry_run") else "")
@@ -509,10 +510,14 @@ def send_report(stats):
     except Exception as e:  # noqa: BLE001
         print(f"[report] construction HTML échouée: {e}")
         html_body = None
+    print(f"[rapport] tentative envoi à {config.REPORT_EMAIL}...")
     try:
         gmail_reader.send_email(config.REPORT_EMAIL, subject, text_body, html_body=html_body)
+        print("[rapport] envoi OK")
+        return True, "Rapport envoyé"
     except Exception as e:  # noqa: BLE001
-        print(f"[report] envoi email échoué: {e}\n{text_body}")
+        print(f"[rapport] ERREUR: {e}")
+        return False, str(e)
 
 
 # ---------------------------------------------------------------------------
