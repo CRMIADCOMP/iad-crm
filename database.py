@@ -126,7 +126,8 @@ def get_last_run_ts():
 
 
 def set_last_run_ts(ts=None):
-    set_state("last_run_ts", ts or time.time())
+    # /!\ ne pas utiliser "ts or time.time()" : 0 est falsy et serait écrasé.
+    set_state("last_run_ts", time.time() if ts is None else ts)
 
 
 def get_last_reply_check_ts():
@@ -135,7 +136,7 @@ def get_last_reply_check_ts():
 
 
 def set_last_reply_check_ts(ts=None):
-    set_state("last_reply_check_ts", ts or time.time())
+    set_state("last_reply_check_ts", time.time() if ts is None else ts)
 
 
 # ---------------------------------------------------------------------------
