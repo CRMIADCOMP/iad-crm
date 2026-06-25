@@ -337,14 +337,33 @@ def update_config():
         if data.get("broker_name") or data.get("broker_phone"):
             db.set_broker(data.get("broker_name"), data.get("broker_phone"))
             msgs.append("bróker actualizado")
+        if data.get("iad_profile_url"):
+            db.set_iad_profile_url(data["iad_profile_url"])
+            msgs.append("URL perfil IAD actualizada")
         if data.get("new_city_abbrev") and data.get("new_city_full"):
             db.add_custom_city(data["new_city_abbrev"], data["new_city_full"])
             msgs.append(f"ciudad añadida: {data['new_city_full']}")
         bn, bp = db.get_broker()
         return jsonify({"status": "ok", "message": "; ".join(msgs) or "sin cambios",
-                        "broker_name": bn, "broker_phone": bp})
+                        "broker_name": bn, "broker_phone": bp,
+                        "iad_profile_url": db.get_iad_profile_url()})
     bn, bp = db.get_broker()
-    return jsonify({"broker_name": bn, "broker_phone": bp})
+    return jsonify({"broker_name": bn, "broker_phone": bp,
+                    "iad_profile_url": db.get_iad_profile_url()})
+
+
+@app.route("/sync_iad_urls", methods=["GET", "POST"])
+def sync_iad_urls():
+    """Scrapea el perfil IAD y sincroniza URLs/datos en la pestaña Config."""
+    if not _authorized(request):
+        return jsonify({"error": "unauthorized"}), 401
+    import sheets_handler
+    try:
+        sheets_handler.reset_cache()
+        report = sheets_handler.sync_iad_urls()
+        return jsonify({"status": "ok", **report}), 200
+    except Exception as e:  # noqa: BLE001
+        return jsonify({"status": "error", "message": str(e)}), 500
 
 
 @app.route("/add_bien", methods=["POST"])
@@ -564,80 +583,83 @@ text-decoration:none;padding:11px 18px;border-radius:8px;font-weight:bold;font-s
 </div>
 
 <div class="card">
-  <h3>📡 Statut en temps réel</h3>
-  <div class="status-line"><span>Service</span><b id="svc">…</b></div>
-  <div class="status-line"><span>Prochain run automatique</span><b id="next">…</b></div>
-  <div class="status-line"><span>Dernier run</span><b id="last">…</b></div>
+  <h3>📡 Estado en tiempo real</h3>
+  <div class="status-line"><span>Servicio</span><b id="svc">…</b></div>
+  <div class="status-line"><span>Próximo run automático</span><b id="next">…</b></div>
+  <div class="status-line"><span>Último run</span><b id="last">…</b></div>
 </div>
 
 <div class="card">
-  <h3>⚡ Actions rapides</h3>
+  <h3>⚡ Acciones rápidas</h3>
   <div class="actions">
-    <button class="btn" onclick="act('POST','/run','Lancer le pipeline')">▶️ Lancer le pipeline</button>
-    <button class="btn" onclick="act('GET','/full_scan','Scan complet 30j')">🔄 Scan complet 30 jours</button>
-    <button class="btn" onclick="act('POST','/send_report','Envoi du rapport')">📧 Générer et envoyer le rapport</button>
-    <button class="btn gray" onclick="act('POST','/setup_dropdowns','Listes déroulantes')">🔧 Configurer listes déroulantes (1 fois)</button>
+    <button class="btn" onclick="act('POST','/run','Ejecutar pipeline ahora')">▶️ Ejecutar pipeline ahora</button>
+    <button class="btn" onclick="act('GET','/full_scan','Escaneo completo (30 días)')">🔄 Escaneo completo (30 días)</button>
+    <button class="btn" onclick="act('POST','/send_report','Generar y enviar informe')">📧 Generar y enviar informe</button>
+    <button class="btn gray" onclick="act('POST','/setup_dropdowns','Listas desplegables')">🔧 Configurar listas desplegables (1 vez)</button>
   </div>
   <div class="spinner" id="spin"></div>
   <pre id="result" style="display:none;"></pre>
 </div>
 
 <div class="card">
-  <h3>📊 Résultats du dernier run</h3>
-  <div class="cards" id="metrics"><span class="muted">Chargement…</span></div>
+  <h3>📊 Último run</h3>
+  <div class="cards" id="metrics"><span class="muted">Cargando…</span></div>
 </div>
 
 <div class="card" id="alertsCard" style="display:none;">
-  <h3 style="border-color:var(--orange);">🐛 Alertes et bugs</h3>
+  <h3 style="border-color:var(--orange);">🐛 Alertas y errores</h3>
   <div id="alerts"></div>
 </div>
 
 <div class="card" id="unmatchedCard" style="display:none;">
-  <h3 style="border-color:var(--red);">📋 Leads non classifiés</h3>
-  <table><thead><tr><th>Téléphone</th><th>Portail</th><th>Raison</th></tr></thead><tbody id="unmatched"></tbody></table>
+  <h3 style="border-color:var(--red);">📋 Leads sin clasificar</h3>
+  <table><thead><tr><th>Teléfono</th><th>Portal</th><th>Razón</th></tr></thead><tbody id="unmatched"></tbody></table>
 </div>
 
 <div class="card" id="respCard" style="display:none;">
-  <h3>📬 Réponses Idealista</h3>
+  <h3>📬 Respuestas Idealista</h3>
   <div id="resp"></div>
 </div>
 
 <div class="card">
-  <h3 style="border-color:var(--orange);">🏠 Gestion des biens</h3>
+  <h3 style="border-color:var(--orange);">🏠 Gestión de inmuebles</h3>
   <div class="actions">
-    <button class="btn" onclick="openModal('addModal')">➕ Ajouter un nouveau bien</button>
-    <button class="btn orange" onclick="openModal('closeModal')">🏁 Marquer un bien comme vendu</button>
+    <button class="btn" onclick="openModal('addModal')">➕ Añadir un nuevo inmueble</button>
+    <button class="btn orange" onclick="openModal('closeModal')">🏁 Marcar inmueble como vendido</button>
+    <button class="btn light" onclick="act('POST','/sync_iad_urls','Sincronizar URLs IAD')">🔄 Sincronizar URLs IAD</button>
   </div>
 </div>
 
 <div class="card" style="text-align:center;">
-  <h3 style="border:none;padding:0;text-align:center;">🔗 Liens rapides</h3>
-  <a class="sheetbtn" href="__SHEET_URL__" target="_blank">📊 Ouvrir Google Sheets</a>
-  <a class="extbtn" href="https://www.idealista.com/tools/listadooffice?Agent=39869786&ItemsPerPage=20&CurrentPage=1&OrderedBy=activationdateCol&OrderedType=DESC" target="_blank">🏠 Ma page Idealista ↗</a>
-  <a class="extbtn" href="https://www.iadespana.es/agente-inmobiliario/thibaut.montalat" target="_blank">👤 Ma page IAD ↗</a>
+  <h3 style="border:none;padding:0;text-align:center;">🔗 Enlaces rápidos</h3>
+  <a class="sheetbtn" href="__SHEET_URL__" target="_blank">📊 Abrir hoja de compradores</a>
+  <a class="extbtn" href="https://www.idealista.com/tools/listadooffice?Agent=39869786&ItemsPerPage=20&CurrentPage=1&OrderedBy=activationdateCol&OrderedType=DESC" target="_blank">🏠 Mi página Idealista ↗</a>
+  <a class="extbtn" href="https://www.iadespana.es/agente-inmobiliario/thibaut.montalat" target="_blank">👤 Mi página IAD ↗</a>
 </div>
 
-<!-- Configuración (bróker) -->
+<!-- Configuración (bróker + perfil IAD) -->
 <div class="card">
   <h3>⚙️ Configuración</h3>
   <label style="font-size:12px;color:#666;">Nombre del bróker</label>
   <input id="cfg_broker_name" style="width:100%;box-sizing:border-box;padding:10px;border:1px solid #ddd;border-radius:6px;margin-bottom:8px;">
   <label style="font-size:12px;color:#666;">Teléfono del bróker</label>
-  <input id="cfg_broker_phone" style="width:100%;box-sizing:border-box;padding:10px;border:1px solid #ddd;border-radius:6px;margin-bottom:10px;">
-  <button class="btn" onclick="saveConfig()">💾 Guardar configuración</button>
+  <input id="cfg_broker_phone" style="width:100%;box-sizing:border-box;padding:10px;border:1px solid #ddd;border-radius:6px;margin-bottom:8px;">
+  <label style="font-size:12px;color:#666;">URL perfil IAD (para sincronización)</label>
+  <input id="cfg_iad_url" style="width:100%;box-sizing:border-box;padding:10px;border:1px solid #ddd;border-radius:6px;margin-bottom:10px;">
+  <button class="btn" onclick="saveConfig()">💾 Guardar</button>
 </div>
 
-<!-- Tests & Simulation (bas de page) -->
+<!-- Pruebas y simulación (al final de la página) -->
 <div class="card" style="background:var(--gray);border:1px solid var(--orange);">
-  <h3 style="border-color:var(--orange);">🧪 Tests &amp; Simulation</h3>
+  <h3 style="border-color:var(--orange);">🧪 Pruebas y simulación</h3>
   <div class="actions">
-    <button class="btn light" onclick="act('GET','/run?dry_run=true','Simulation (dry run)')">🔍 Simulation (dry run)</button>
-    <button class="btn light" onclick="act('GET','/full_scan?dry_run=true','Scan complet simulation')">🔄 Scan complet en simulation</button>
-    <button class="btn light" onclick="act('POST','/send_report','Test email')">📧 Test email minimal</button>
-    <button class="btn orange" onclick="act('POST','/reset_timestamp','Reset timestamp')">🔁 Reset timestamp</button>
-    <button class="btn gray" onclick="act('GET','/diag','Diagnostic complet')">🔍 Diagnostic complet</button>
+    <button class="btn light" onclick="act('GET','/run?dry_run=true','Simulación (sin envíos WhatsApp)')">🔍 Simulación (sin envíos WhatsApp)</button>
+    <button class="btn light" onclick="act('GET','/full_scan?dry_run=true','Escaneo completo en simulación')">🔄 Escaneo completo en simulación</button>
+    <button class="btn light" onclick="act('POST','/send_report','Prueba de email')">📧 Prueba de email</button>
+    <button class="btn orange" onclick="act('POST','/reset_timestamp','Reiniciar marca de tiempo')">🔁 Reiniciar marca de tiempo</button>
+    <button class="btn gray" onclick="act('GET','/diag','Diagnóstico completo')">🔍 Diagnóstico completo</button>
   </div>
-  <p style="font-size:12px;color:#9a6b00;margin:12px 0 0;">⚠️ Ces actions sont réservées aux tests — ne pas utiliser en production courante</p>
+  <p style="font-size:12px;color:#9a6b00;margin:12px 0 0;">⚠️ Estas acciones son solo para pruebas — no usar en producción habitual</p>
 </div>
 
 <!-- Modal Ajouter un bien (formulario completo con generación en tiempo real) -->
@@ -674,13 +696,13 @@ text-decoration:none;padding:11px 18px;border-radius:8px;font-weight:bold;font-s
   </div>
 </div></div>
 
-<!-- Modal Clôturer un bien -->
+<!-- Modal Marcar como vendido -->
 <div id="closeModal" class="modal"><div class="modalbox">
-  <h3>🏁 Marquer un bien comme vendu</h3>
-  <label>Bien actif</label><select id="cb_nom"><option>Chargement…</option></select>
+  <h3>🏁 Marcar inmueble como vendido</h3>
+  <label>Inmueble activo</label><select id="cb_nom"><option>Cargando…</option></select>
   <div class="modalbtns">
-    <button class="btn gray" onclick="closeModal('closeModal')">Annuler</button>
-    <button class="btn orange" onclick="submitCloseBien()">Marquer vendu</button>
+    <button class="btn gray" onclick="closeModal('closeModal')">Cancelar</button>
+    <button class="btn orange" onclick="submitCloseBien()">Marcar vendido</button>
   </div>
 </div></div>
 
@@ -690,28 +712,28 @@ function esc(s){return String(s==null?'':s).replace(/[&<>"]/g,c=>({'&':'&amp;','
 async function refreshStatus(){
   try{
     const h=await (await fetch('/health')).json();
-    document.getElementById('svc').innerHTML='🟢 En ligne';
+    document.getElementById('svc').innerHTML='🟢 En línea';
     document.getElementById('next').textContent=h.next_run||'—';
     const s=await (await fetch('/status')).json();
     const lr=s.last_run;
     document.getElementById('last').textContent = lr&&lr.finished_at
-      ? (new Date(lr.finished_at).toLocaleString('fr-FR'))+' ('+(lr.duration_s||0)+'s)'
+      ? (new Date(lr.finished_at).toLocaleString('es-ES'))+' ('+(lr.duration_s||0)+'s)'
       : (h.last_run_str||'—');
     renderResults(lr);
-  }catch(e){ document.getElementById('svc').innerHTML='🔴 Hors ligne'; }
+  }catch(e){ document.getElementById('svc').innerHTML='🔴 Fuera de línea'; }
 }
 function metric(n,l,bg){return '<div class="metric" style="background:'+bg+'"><div class="n">'+(n||0)+'</div><div class="l">'+l+'</div></div>';}
 function renderResults(lr){
   const m=document.getElementById('metrics');
-  if(!lr){m.innerHTML='<span class="muted">Aucun run pour le moment.</span>';return;}
+  if(!lr){m.innerHTML='<span class="muted">Aún no hay ningún run.</span>';return;}
   const alerts=(lr.alerts||[]).length;
   m.innerHTML =
-    metric(lr.leads_detected,'Leads détectés','#00628C')+
-    metric(lr.prospects_new,'Nouveaux prospects','#28A745')+
-    metric(lr.wa_first_sent,'WhatsApp envoyés','#00b1eb')+
-    metric(lr.leads_unmatched,'Leads non matchés','#E87722')+
-    metric(alerts,'Alertes', alerts>0?'#DC3545':'#6c757d')+
-    metric(lr.mails_deleted,'Mails supprimés','#6c757d');
+    metric(lr.leads_detected,'Leads detectados','#00628C')+
+    metric(lr.prospects_new,'Nuevos prospectos','#28A745')+
+    metric(lr.wa_first_sent,'WhatsApp enviados','#00b1eb')+
+    metric(lr.leads_unmatched,'Leads sin clasificar','#E87722')+
+    metric(alerts,'Alertas', alerts>0?'#DC3545':'#6c757d')+
+    metric(lr.mails_deleted,'Correos eliminados','#6c757d');
   // alertes + erreurs
   const ac=document.getElementById('alertsCard'),ad=document.getElementById('alerts');
   const al=(lr.alerts||[]),er=(lr.errors||[]);
@@ -732,7 +754,7 @@ function renderResults(lr){
     const g={};rs.forEach(r=>{const k=r.bien||('Ref '+r.ref);(g[k]=g[k]||{url:r.url,names:[]}).names.push(r.nombre);});
     rd.innerHTML=Object.keys(g).map(k=>{const d=g[k];
       const link=d.url?' — <a href="'+esc(d.url)+'" target="_blank">'+esc(d.url)+'</a>':'';
-      return '<div class="bien">🏠 '+esc(k)+link+'</div>'+d.names.map(n=>'<div class="resp">└ '+esc(n)+' a répondu</div>').join('');
+      return '<div class="bien">🏠 '+esc(k)+link+'</div>'+d.names.map(n=>'<div class="resp">└ '+esc(n)+' ha respondido</div>').join('');
     }).join('');
   }else rc.style.display='none';
 }
@@ -743,7 +765,7 @@ async function act(method,url,label){
     const r=await fetch(url,{method:method});
     const j=await r.json();
     res.textContent=label+' →\n'+JSON.stringify(j,null,2);
-  }catch(e){res.textContent=label+' → erreur: '+e;}
+  }catch(e){res.textContent=label+' → error: '+e;}
   sp.style.display='none';res.style.display='block';
   setTimeout(refreshStatus,1500);
 }
@@ -755,7 +777,7 @@ async function loadBiens(){
   try{const r=await (await fetch('/list_biens')).json();
     const sel=document.getElementById('cb_nom');
     const biens=r.biens||[];
-    sel.innerHTML = biens.length ? biens.map(b=>'<option>'+esc(b)+'</option>').join('') : '<option value="">(aucun bien actif)</option>';
+    sel.innerHTML = biens.length ? biens.map(b=>'<option>'+esc(b)+'</option>').join('') : '<option value="">(ningún inmueble activo)</option>';
   }catch(e){}
 }
 // --- Gestión de inmuebles: ciudades, abreviaturas, vista previa en tiempo real ---
@@ -819,23 +841,24 @@ async function loadConfig(){
   try{const r=await (await fetch('/update_config')).json();
     document.getElementById('cfg_broker_name').value=r.broker_name||'';
     document.getElementById('cfg_broker_phone').value=r.broker_phone||'';
+    const iu=document.getElementById('cfg_iad_url'); if(iu) iu.value=r.iad_profile_url||'';
   }catch(e){}
 }
 async function saveConfig(){
   const sp=document.getElementById('spin');sp.style.display='block';
   try{const r=await fetch('/update_config',{method:'POST',headers:{'Content-Type':'application/json'},
-    body:JSON.stringify({broker_name:val('cfg_broker_name'),broker_phone:val('cfg_broker_phone')})});
+    body:JSON.stringify({broker_name:val('cfg_broker_name'),broker_phone:val('cfg_broker_phone'),iad_profile_url:val('cfg_iad_url')})});
     showResult('Configuración',await r.json());
   }catch(e){showResult('Configuración',{status:'error',message:String(e)});}
   sp.style.display='none';
 }
 async function submitCloseBien(){
   const nom=val('cb_nom');
-  if(!nom){alert('Choisis un bien');return;}
+  if(!nom){alert('Elige un inmueble');return;}
   const sp=document.getElementById('spin');sp.style.display='block';
   try{const r=await fetch('/close_bien',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({nom:nom})});
-    showResult('Clôture bien',await r.json());closeModal('closeModal');loadBiens();}
-  catch(e){showResult('Clôture bien',{status:'error',message:String(e)});}
+    showResult('Cierre de inmueble',await r.json());closeModal('closeModal');loadBiens();}
+  catch(e){showResult('Cierre de inmueble',{status:'error',message:String(e)});}
   sp.style.display='none';
 }
 refreshStatus();

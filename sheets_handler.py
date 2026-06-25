@@ -784,19 +784,62 @@ def add_bien(data):
     except Exception as e:  # noqa: BLE001
         print(f"[add_bien] mise en page échouée pour '{nom}': {e}")
 
-    # Fila correspondiente en la pestana Config.
+    # Enriquecimiento automático: busca el anuncio IAD correspondiente (best-effort).
+    # Rellena URL/Ref IAD (I/J) y superficie/terreno/habitaciones (M/N/O) si se encuentra.
+    surf_hab = surf_terr = habs = matched_ref = ""
+    extra = []
+    try:
+        import iad_scraper
+        import database as dbm
+        parsed = config.parse_bien_info(nom, dbm.get_city_names())
+        listings, err = iad_scraper.scrape_iad_listings(dbm.get_iad_profile_url())
+        if err:
+            extra.append(f"⚠️ scraping IAD: {err}")
+        else:
+            match = iad_scraper.find_match(
+                listings, price=_price_to_num(parsed["price"]),
+                city=parsed["city"], type_code=parsed["type_code"])
+            if match:
+                url_iad = url_iad or match.get("url", "")
+                matched_ref = match.get("ref", "")
+                surf_hab = match.get("surface_hab", "")
+                surf_terr = match.get("surface_terreno", "")
+                habs = match.get("habitaciones", "")
+                extra.append(f"✅ URL IAD trouvée ({matched_ref})")
+                if surf_hab:
+                    extra.append(f"{surf_hab} m²")
+                if habs:
+                    extra.append(f"{habs} hab.")
+            else:
+                extra.append("⚠️ Aucune annonce IAD correspondante")
+    except Exception as e:  # noqa: BLE001
+        extra.append(f"⚠️ enrichissement IAD échoué: {e}")
+
+    ref_iad_val = _ref_from_url(url_iad) or matched_ref
+
+    # Fila correspondiente en la pestana Config (A..P).
     config_ws = _get_config_worksheet()
-    new_row = [
-        nom, desc,
-        url_idea, _ref_from_url(url_idea),
-        url_foto, _ref_from_url(url_foto),
-        url_habi, _ref_from_url(url_habi),
-        url_iad, _ref_from_url(url_iad),
-    ]
+    new_row = [""] * 16
+    new_row[0] = nom
+    new_row[1] = desc
+    new_row[2] = url_idea
+    new_row[3] = _ref_from_url(url_idea)
+    new_row[4] = url_foto
+    new_row[5] = _ref_from_url(url_foto)
+    new_row[6] = url_habi
+    new_row[7] = _ref_from_url(url_habi)
+    new_row[8] = url_iad
+    new_row[9] = ref_iad_val
+    new_row[12] = surf_hab       # M
+    new_row[13] = surf_terr      # N
+    new_row[14] = habs           # O
     _write_throttle()
     config_ws.append_row(new_row, value_input_option="USER_ENTERED")
     reset_cache()
-    return f"Bien ajouté : {nom}"
+    msg = f"Bien ajouté : {nom}"
+    if extra:
+        msg += " — " + ", ".join(extra)
+    return msg
 
 
 def close_bien(nom):
@@ -952,6 +995,91 @@ def sync_sheets(stats):
         except Exception as e:  # noqa: BLE001
             stats.setdefault("errors", []).append(f"sync_sheets {t}: {e}")
             print(f"[sync] échec mise en page '{t}': {e}")
+
+
+def _price_to_num(p):
+    """Convierte un precio abreviado ('55k', '12 500') en su valor numérico en texto."""
+    p = (p or "").strip().lower()
+    if not p:
+        return ""
+    digits = "".join(c for c in p if c.isdigit())
+    if p.endswith("k") and digits:
+        return str(int(digits) * 1000)
+    return digits
+
+
+def sync_iad_urls(profile_url=None):
+    """Sincroniza las URLs/datos de los anuncios IAD con la pestaña Config.
+
+    Scrapea el perfil IAD, empareja cada anuncio con una fila de Config (por ref IAD
+    en col J o, si no, por precio+tipo+ciudad) y actualiza las columnas I (URL IAD),
+    J (Ref IAD), M (sup. habitable), N (sup. terreno), O (habitaciones).
+    Devuelve un informe dict con: updated, iad_no_match, config_no_iad, scraped, error.
+    """
+    import iad_scraper
+    import database as dbm
+    profile_url = profile_url or dbm.get_iad_profile_url()
+    listings, err = iad_scraper.scrape_iad_listings(profile_url)
+    report = {"updated": [], "iad_no_match": [], "config_no_iad": [],
+              "scraped": len(listings), "error": err}
+    if err:
+        return report
+
+    cc = config.CONFIG_COL
+    config_ws = _get_config_worksheet()
+    values = config_ws.get_all_values()
+    city_names = dbm.get_city_names()
+    matched = set()
+
+    for i, row in enumerate(values[1:], start=2):
+        def g(idx):
+            return (row[idx] if idx < len(row) else "").strip()
+        feuille = g(cc["feuille"])
+        if not feuille or feuille.lower().startswith("vend "):
+            continue
+        parsed = config.parse_bien_info(feuille, city_names)
+        ref_iad = g(cc["ref_iad"])
+        match = None
+        # 1) por referencia IAD ya registrada
+        if ref_iad:
+            for it in listings:
+                if it.get("ref") and "".join(filter(str.isdigit, it["ref"])) == \
+                        "".join(filter(str.isdigit, ref_iad)):
+                    match = it
+                    break
+        # 2) por precio + tipo + ciudad
+        if not match:
+            match = iad_scraper.find_match(
+                listings, price=_price_to_num(parsed["price"]),
+                city=parsed["city"], type_code=parsed["type_code"])
+        if not match:
+            report["config_no_iad"].append(feuille)
+            continue
+        matched.add(id(match))
+        updates = {}
+        if match.get("url"):
+            updates[cc["url_iad"] + 1] = match["url"]
+        if match.get("ref"):
+            updates[cc["ref_iad"] + 1] = match["ref"]
+        if match.get("surface_hab"):
+            updates[cc["surface_hab"] + 1] = match["surface_hab"]
+        if match.get("surface_terreno"):
+            updates[cc["surface_terreno"] + 1] = match["surface_terreno"]
+        if match.get("habitaciones"):
+            updates[cc["habitaciones"] + 1] = match["habitaciones"]
+        for colnum, val in updates.items():
+            _write_throttle()
+            config_ws.update_cell(i, colnum, val)
+        report["updated"].append({"feuille": feuille, "ref": match.get("ref"),
+                                  "surface": match.get("surface_hab"),
+                                  "habitaciones": match.get("habitaciones")})
+
+    for it in listings:
+        if id(it) not in matched:
+            report["iad_no_match"].append({"ref": it.get("ref"), "url": it.get("url"),
+                                           "price": it.get("price")})
+    reset_cache()
+    return report
 
 
 def diag():

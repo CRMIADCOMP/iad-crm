@@ -134,6 +134,18 @@ def set_broker(name=None, phone=None):
         set_state("broker_phone", phone)
 
 
+def get_iad_profile_url():
+    """Devuelve la URL del perfil IAD (override de la BD o el valor por defecto de config)."""
+    import config
+    return get_state("iad_profile_url") or config.IAD_PROFILE_URL
+
+
+def set_iad_profile_url(url):
+    """Guarda la URL del perfil IAD para la sincronización."""
+    if url:
+        set_state("iad_profile_url", url.strip())
+
+
 def get_custom_cities():
     """Devuelve el dict de ciudades añadidas desde el dashboard (abreviatura->nombre)."""
     raw = get_state("custom_cities")

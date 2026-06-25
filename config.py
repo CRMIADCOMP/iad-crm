@@ -129,7 +129,17 @@ CONFIG_COL = {
     "ref_habitaclia": 7, # H - Referencia del anuncio en Habitaclia
     "url_iad": 8,        # I - URL del anuncio en IAD
     "ref_iad": 9,        # J - Referencia del anuncio en IAD
+    # Nuevas columnas para datos extraídos por scraping (IAD/Idealista):
+    "surface_hab": 12,   # M - Superficie habitable (m²)
+    "surface_terreno": 13,  # N - Superficie del terreno (m²)
+    "habitaciones": 14,  # O - Número de habitaciones
+    "banos": 15,         # P - Número de baños
 }
+
+# URL del perfil IAD del agente (para el scraping / sincronización de anuncios).
+# Editable desde el dashboard (override en la base de datos).
+IAD_PROFILE_URL = os.environ.get(
+    "IAD_PROFILE_URL", "https://www.iadespana.es/agente-inmobiliario/thibaut.montalat")
 
 # ---------------------------------------------------------------------------
 # Tipos de inmueble y ciudades (parseo del nombre de la hoja)
