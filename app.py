@@ -352,9 +352,11 @@ def update_config():
                     "iad_profile_url": db.get_iad_profile_url()})
 
 
-@app.route("/sync_all_sheets", methods=["GET", "POST"])
+@app.route("/sync_all_sheets", methods=["POST"])
 def sync_all_sheets():
     """Reescribe la navegación (fila 1) y sincroniza la col B de Config en todas las hojas."""
+    print(f"[sync_all_sheets] appelé — method={request.method} "
+          f"session.auth={session.get('auth')} pid={os.getpid()} host={socket.gethostname()}")
     if not _authorized(request):
         return jsonify({"error": "sesión expirada", "redirect": "/login"}), 401
     import sheets_handler
