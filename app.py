@@ -220,7 +220,7 @@ def manual_run():
     Devuelve: 202 con el estado de arranque, o 401 si no está autorizado.
     """
     if not _authorized(request):
-        return jsonify({"error": "unauthorized"}), 401
+        return jsonify({"error": "sesión expirada", "redirect": "/login"}), 401
     # Interpreta el parámetro dry_run de la query como booleano.
     dry_run = request.args.get("dry_run", "").lower() in ("1", "true", "yes")
     _run_pipeline_async(dry_run=dry_run)
@@ -238,7 +238,7 @@ def full_scan():
     Devuelve: 202 con el estado de arranque, o 401 si no está autorizado.
     """
     if not _authorized(request):
-        return jsonify({"error": "unauthorized"}), 401
+        return jsonify({"error": "sesión expirada", "redirect": "/login"}), 401
     # Interpreta el parámetro dry_run de la query como booleano.
     dry_run = request.args.get("dry_run", "").lower() in ("1", "true", "yes")
     _run_pipeline_async(dry_run=dry_run, full_scan=True)
@@ -256,7 +256,7 @@ def reset_timestamp():
     Devuelve: 200 con el nuevo valor de last_run_ts, o 401 si no está autorizado.
     """
     if not _authorized(request):
-        return jsonify({"error": "unauthorized"}), 401
+        return jsonify({"error": "sesión expirada", "redirect": "/login"}), 401
     db.set_last_run_ts(0)
     return jsonify({"status": "timestamp_reset", "last_run_ts": db.get_last_run_ts(),
                     "note": "Lance /run pour retraiter les mails des dernières 24h"}), 200
@@ -273,7 +273,7 @@ def send_report_route():
               o 401 si no está autorizado.
     """
     if not _authorized(request):
-        return jsonify({"error": "unauthorized"}), 401
+        return jsonify({"error": "sesión expirada", "redirect": "/login"}), 401
     raw = db.get_state("last_run_stats")
     if not raw:
         return jsonify({"status": "error",
@@ -295,7 +295,7 @@ def list_biens():
     Devuelve: JSON {"biens": [...]} con los nombres de inmuebles activos, o 401/500 en error.
     """
     if not _authorized(request):
-        return jsonify({"error": "unauthorized"}), 401
+        return jsonify({"error": "sesión expirada", "redirect": "/login"}), 401
     import sheets_handler
     try:
         sheets_handler.reset_cache()
@@ -308,7 +308,7 @@ def list_biens():
 def check_bien():
     """Indica si un nombre de bien ya existe (Config u hoja). Param: ?name=..."""
     if not _authorized(request):
-        return jsonify({"error": "unauthorized"}), 401
+        return jsonify({"error": "sesión expirada", "redirect": "/login"}), 401
     import sheets_handler
     name = request.args.get("name", "")
     try:
@@ -322,7 +322,7 @@ def check_bien():
 def list_cities():
     """Devuelve el mapeo de ciudades (config + personalizadas)."""
     if not _authorized(request):
-        return jsonify({"error": "unauthorized"}), 401
+        return jsonify({"error": "sesión expirada", "redirect": "/login"}), 401
     return jsonify({"cities": db.get_city_names()})
 
 
@@ -330,7 +330,7 @@ def list_cities():
 def update_config():
     """GET: devuelve la config editable (bróker). POST: guarda bróker y/o ciudad nueva."""
     if not _authorized(request):
-        return jsonify({"error": "unauthorized"}), 401
+        return jsonify({"error": "sesión expirada", "redirect": "/login"}), 401
     if request.method == "POST":
         data = request.get_json(silent=True) or request.form.to_dict() or {}
         msgs = []
@@ -356,7 +356,7 @@ def update_config():
 def sync_all_sheets():
     """Reescribe la navegación (fila 1) y sincroniza la col B de Config en todas las hojas."""
     if not _authorized(request):
-        return jsonify({"error": "unauthorized"}), 401
+        return jsonify({"error": "sesión expirada", "redirect": "/login"}), 401
     import sheets_handler
     try:
         sheets_handler.reset_cache()
@@ -369,7 +369,7 @@ def sync_all_sheets():
 def sync_iad_urls():
     """Scrapea el perfil IAD y sincroniza URLs/datos en la pestaña Config."""
     if not _authorized(request):
-        return jsonify({"error": "unauthorized"}), 401
+        return jsonify({"error": "sesión expirada", "redirect": "/login"}), 401
     import sheets_handler
     try:
         sheets_handler.reset_cache()
@@ -388,7 +388,7 @@ def add_bien():
     Devuelve: 200 con un mensaje de éxito, 400 en error de datos, o 401 si no autorizado.
     """
     if not _authorized(request):
-        return jsonify({"error": "unauthorized"}), 401
+        return jsonify({"error": "sesión expirada", "redirect": "/login"}), 401
     import sheets_handler
     # Acepta tanto cuerpo JSON como datos de formulario.
     data = request.get_json(silent=True) or request.form.to_dict()
@@ -409,7 +409,7 @@ def close_bien():
     Devuelve: 200 con un mensaje de éxito, 400 en error, o 401 si no autorizado.
     """
     if not _authorized(request):
-        return jsonify({"error": "unauthorized"}), 401
+        return jsonify({"error": "sesión expirada", "redirect": "/login"}), 401
     import sheets_handler
     # Acepta tanto cuerpo JSON como datos de formulario.
     data = request.get_json(silent=True) or request.form.to_dict()
@@ -430,7 +430,7 @@ def setup_dropdowns():
     Devuelve: 200 con las hojas configuradas, su número y los valores aplicados; 401/500 en error.
     """
     if not _authorized(request):
-        return jsonify({"error": "unauthorized"}), 401
+        return jsonify({"error": "sesión expirada", "redirect": "/login"}), 401
     import sheets_handler
     try:
         sheets_handler.reset_cache()
@@ -450,7 +450,7 @@ def test_email():
     Devuelve: 200 con el id del mensaje si se envió, 500 en error, o 401 si no autorizado.
     """
     if not _authorized(request):
-        return jsonify({"error": "unauthorized"}), 401
+        return jsonify({"error": "sesión expirada", "redirect": "/login"}), 401
     import gmail_reader
     try:
         resp = gmail_reader.send_email(config.REPORT_EMAIL, "Test CRM IAD", "Test envoi rapport")
@@ -551,7 +551,8 @@ DASHBOARD_HTML = r"""<!DOCTYPE html><html lang="fr"><head><meta charset="utf-8">
 *{box-sizing:border-box;}
 body{margin:0;font-family:Arial,sans-serif;background:var(--gray);color:#333;}
 .wrap{max-width:900px;margin:0 auto;padding:18px;}
-.header{background:#fff;border-radius:12px;padding:22px;text-align:center;margin-bottom:18px;box-shadow:0 1px 3px rgba(0,0,0,.06);}
+.header{position:relative;background:#fff;border-radius:12px;padding:22px;text-align:center;margin-bottom:18px;box-shadow:0 1px 3px rgba(0,0,0,.06);}
+.logoutbtn{position:absolute;top:12px;right:12px;background:transparent;border:1px solid var(--red);color:var(--red);padding:6px 10px;border-radius:6px;font-size:12px;cursor:pointer;text-decoration:none;}
 .header h1{color:var(--dark);font-size:20px;margin:12px 0 2px;}
 .header h2{color:#888;font-size:14px;font-weight:normal;margin:0;}
 .card{background:#fff;border-radius:12px;padding:18px 20px;margin-bottom:18px;box-shadow:0 1px 3px rgba(0,0,0,.06);}
@@ -602,6 +603,7 @@ text-decoration:none;padding:11px 18px;border-radius:8px;font-weight:bold;font-s
 </style></head><body><div class="wrap">
 
 <div class="header">
+  <a class="logoutbtn" href="/logout">🔓 Cerrar sesión</a>
   __LOGO__
   <h1>CRM IAD COMP — El Francés Inmobiliaria</h1>
   <h2>Thibaut MONTALAT</h2>
@@ -793,6 +795,7 @@ async function act(method,url,label){
   sp.style.display='block';res.style.display='none';
   try{
     const r=await fetch(url,{method:method});
+    if(r.status===401){window.location.href='/login';return;}
     const j=await r.json();
     res.textContent=label+' →\n'+JSON.stringify(j,null,2);
   }catch(e){res.textContent=label+' → error: '+e;}
@@ -863,6 +866,7 @@ async function submitAddBien(){
     const body={nom:genName(),description:genTitle(),url_idealista:idea,
       url_fotocasa:val('ab_foto'),url_habitaclia:val('ab_habi'),url_iad:val('ab_iad')};
     const r=await fetch('/add_bien',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
+    if(r.status===401){window.location.href='/login';return;}
     showResult('Añadir bien',await r.json());closeModal('addModal');loadBiens();
   }catch(e){showResult('Añadir bien',{status:'error',message:String(e)});}
   sp.style.display='none';
@@ -878,6 +882,7 @@ async function saveConfig(){
   const sp=document.getElementById('spin');sp.style.display='block';
   try{const r=await fetch('/update_config',{method:'POST',headers:{'Content-Type':'application/json'},
     body:JSON.stringify({broker_name:val('cfg_broker_name'),broker_phone:val('cfg_broker_phone'),iad_profile_url:val('cfg_iad_url')})});
+    if(r.status===401){window.location.href='/login';return;}
     showResult('Configuración',await r.json());
   }catch(e){showResult('Configuración',{status:'error',message:String(e)});}
   sp.style.display='none';
@@ -887,6 +892,7 @@ async function submitCloseBien(){
   if(!nom){alert('Elige un inmueble');return;}
   const sp=document.getElementById('spin');sp.style.display='block';
   try{const r=await fetch('/close_bien',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({nom:nom})});
+    if(r.status===401){window.location.href='/login';return;}
     showResult('Cierre de inmueble',await r.json());closeModal('closeModal');loadBiens();}
   catch(e){showResult('Cierre de inmueble',{status:'error',message:String(e)});}
   sp.style.display='none';
