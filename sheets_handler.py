@@ -113,6 +113,25 @@ def _values_for(ws):
     return _values_cache[name]
 
 
+def _header_row(ws):
+    """Devuelve la fila (1-based) de encabezados (donde col A == 'Nombre').
+
+    Detección dinámica que permite trabajar tanto ANTES de la migración
+    (encabezados en la fila 3) como DESPUÉS (fila 4). Si no se encuentra,
+    devuelve config.HEADER_ROW por defecto.
+    """
+    target = config.PROSPECT_HEADERS[0].strip().lower()  # "nombre"
+    for i, row in enumerate(_values_for(ws)[:8], start=1):
+        if row and (row[0] or "").strip().lower() == target:
+            return i
+    return config.HEADER_ROW
+
+
+def _data_start(ws):
+    """Primera fila de datos = fila de encabezados + 1 (detección dinámica)."""
+    return _header_row(ws) + 1
+
+
 def _get_spreadsheet():
     """
     Devuelve el objeto Spreadsheet, autenticando si hace falta.
@@ -415,9 +434,9 @@ def find_prospect(ws, phone="", email=""):
     phone_n = normalize_phone(phone)
     email_n = (email or "").strip().lower()
     values = _values_for(ws)
-    # Los datos empiezan en la fila 4 (config.DATA_START_ROW); las filas 1-3
-    # estan reservadas para cabeceras y no se tocan.
-    start = config.DATA_START_ROW
+    # Detección dinámica: los datos empiezan justo después de la fila de encabezados,
+    # así funciona ANTES (datos en fila 4) y DESPUÉS (datos en fila 5) de la migración.
+    start = _data_start(ws)
     for i, row in enumerate(values[start - 1:], start=start):
         r_phone = normalize_phone(row[config.COL["telefono"] - 1] if len(row) >= config.COL["telefono"] else "")
         r_email = (row[config.COL["email"] - 1] if len(row) >= config.COL["email"] else "").strip().lower()
@@ -470,9 +489,9 @@ def upsert_prospect(feuille, lead):
         new_row[config.COL["fecha_contacto"] - 1] = today  # col I: fecha de 1a deteccion
         new_row[config.COL["estado_final"] - 1] = "Nuevo contacto"
         vals = _values_for(ws)
-        # Escribe en la primera fila libre, nunca antes de la fila 4
-        # (las filas 1-3 estan reservadas para cabeceras).
-        new_index = max(len(vals) + 1, config.DATA_START_ROW)
+        # Escribe en la primera fila libre, nunca antes de la primera fila de datos
+        # (detectada dinámicamente según dónde estén los encabezados).
+        new_index = max(len(vals) + 1, _data_start(ws))
         _write_throttle()
         ws.update(range_name=f"A{new_index}", values=[new_row],
                   value_input_option="USER_ENTERED")
@@ -751,41 +770,7 @@ def add_bien(data):
     if template is None:
         raise ValueError(f"Feuille template '{BIEN_TEMPLATE}' introuvable")
 
-    # Duplica la hoja plantilla y la renombra con el nombre del bien.
-    new_ws = ss.duplicate_sheet(template.id, new_sheet_name=nom)
-    # Vacia los datos (fila 4 en adelante) y conserva las cabeceras (filas 1-3).
-    _write_throttle()
-    new_ws.batch_clear([f"A{config.DATA_START_ROW}:L{new_ws.row_count}"])
-    # En la fila 2 (A2) se escribe la descripcion como titulo del bien.
-    _write_throttle()
-    new_ws.update(range_name="A2", values=[[desc]], value_input_option="USER_ENTERED")
-
-    # Formato del titulo (fila 2): fusion A2:L2, fondo amarillo, negrita, centrado.
-    gid = new_ws.id
-    title_range = {"sheetId": gid, "startRowIndex": 1, "endRowIndex": 2,
-                   "startColumnIndex": 0, "endColumnIndex": 12}
-    fmt_reqs = [
-        {"unmergeCells": {"range": title_range}},
-        {"mergeCells": {"mergeType": "MERGE_ALL", "range": title_range}},
-        {"repeatCell": {"range": title_range,
-                        "cell": {"userEnteredFormat": {
-                            "backgroundColor": _rgb("FFFF00"),
-                            "textFormat": {"bold": True},
-                            "horizontalAlignment": "CENTER"}},
-                        "fields": "userEnteredFormat(backgroundColor,textFormat,horizontalAlignment)"}},
-    ]
-    # Cabecera de navegacion (fila 1) + ref N1 para la hoja recien creada.
-    menu_gid = next((w.id for w in _all_worksheets()
-                     if w.title.strip().lower() in ("menú", "menu")), None)
-    fmt_reqs += _layout_requests(gid, menu_gid, url_idea, url_foto, _ref_from_url(url_idea))
-    try:
-        _write_throttle()
-        ss.batch_update({"requests": fmt_reqs})
-    except Exception as e:  # noqa: BLE001
-        print(f"[add_bien] mise en page échouée pour '{nom}': {e}")
-
-    # Enriquecimiento automático: busca el anuncio IAD correspondiente (best-effort).
-    # Rellena URL/Ref IAD (I/J) y superficie/terreno/habitaciones (M/N/O) si se encuentra.
+    # --- Enriquecimiento automático IAD (best-effort), ANTES de crear la hoja ---
     surf_hab = surf_terr = habs = matched_ref = ""
     extra = []
     try:
@@ -814,8 +799,43 @@ def add_bien(data):
                 extra.append("⚠️ Aucune annonce IAD correspondante")
     except Exception as e:  # noqa: BLE001
         extra.append(f"⚠️ enrichissement IAD échoué: {e}")
-
     ref_iad_val = _ref_from_url(url_iad) or matched_ref
+    info_tech = {"surface_hab": surf_hab, "surface_terreno": surf_terr,
+                 "habitaciones": habs, "banos": ""}
+
+    # Duplica la hoja plantilla y la renombra con el nombre del bien.
+    new_ws = ss.duplicate_sheet(template.id, new_sheet_name=nom)
+    gid = new_ws.id
+    menu_gid = next((w.id for w in _all_worksheets()
+                     if w.title.strip().lower() in ("menú", "menu")), None)
+    try:
+        # 1) Garantiza la fila 3 (info técnica) e inserta si hace falta (estructura nueva).
+        _write_throttle()
+        ss.batch_update({"requests": _ensure_tech_row_requests(new_ws, info_tech)})
+        _values_cache.pop(new_ws.title, None)
+        # 2) Vacía los datos (desde la primera fila de datos = fila 5) conservando cabeceras.
+        _write_throttle()
+        new_ws.batch_clear([f"A{config.DATA_START_ROW}:L{new_ws.row_count}"])
+        # 3) Título en A2 + formato (fusión A2:L2, fondo amarillo) + navegación fila 1.
+        _write_throttle()
+        new_ws.update(range_name="A2", values=[[desc]], value_input_option="USER_ENTERED")
+        title_range = {"sheetId": gid, "startRowIndex": 1, "endRowIndex": 2,
+                       "startColumnIndex": 0, "endColumnIndex": 12}
+        fmt_reqs = [
+            {"unmergeCells": {"range": title_range}},
+            {"mergeCells": {"mergeType": "MERGE_ALL", "range": title_range}},
+            {"repeatCell": {"range": title_range,
+                            "cell": {"userEnteredFormat": {
+                                "backgroundColor": _rgb("FFFF00"),
+                                "textFormat": {"bold": True},
+                                "horizontalAlignment": "CENTER"}},
+                            "fields": "userEnteredFormat(backgroundColor,textFormat,horizontalAlignment)"}},
+        ]
+        fmt_reqs += _layout_requests(gid, menu_gid, url_idea, url_foto, _ref_from_url(url_idea))
+        _write_throttle()
+        ss.batch_update({"requests": fmt_reqs})
+    except Exception as e:  # noqa: BLE001
+        print(f"[add_bien] mise en page échouée pour '{nom}': {e}")
 
     # Fila correspondiente en la pestana Config (A..P).
     config_ws = _get_config_worksheet()
@@ -836,6 +856,10 @@ def add_bien(data):
     _write_throttle()
     config_ws.append_row(new_row, value_input_option="USER_ENTERED")
     reset_cache()
+    try:
+        rebuild_menu()  # actualiza el Menú con el nuevo inmueble
+    except Exception as e:  # noqa: BLE001
+        print(f"[menu] échec après add_bien: {e}")
     msg = f"Bien ajouté : {nom}"
     if extra:
         msg += " — " + ", ".join(extra)
@@ -886,6 +910,10 @@ def close_bien(nom):
                 config_ws.update_cell(i, cc[urlcol] + 1, "")
             break
     reset_cache()
+    try:
+        rebuild_menu()  # mueve el bien a la sección "vendidos" del Menú
+    except Exception as e:  # noqa: BLE001
+        print(f"[menu] échec après close_bien: {e}")
     return f"Bien clôturé : {new_title}"
 
 
@@ -952,11 +980,74 @@ def _layout_requests(gid, menu_gid, url_idea, url_foto, ref_idea):
     else:
         anuncio = _cell("🔗 Ver anuncio", "CCCCCC", white=False)
     reqs.append(_update_cell_req(gid, 5, anuncio))
-    # 4) N1 -> "Ref. Idealista: XXXX" fondo azul claro, texto blanco, tamaño 9 (sin enlace).
-    if ref_idea:
-        reqs.append(_update_cell_req(gid, 13, _cell(f"Ref. Idealista: {ref_idea}", "00B1EB",
-                                                    white=True, size=9)))
+    # (La celda N1 ya NO se escribe: ni en los runs ni al crear un bien.)
     return reqs
+
+
+def _tech_cell(text):
+    """Celda de la fila 3 (info técnica): fondo gris, texto gris, cursiva, tamaño 9, centrado."""
+    return {"userEnteredValue": {"stringValue": text},
+            "userEnteredFormat": {"backgroundColor": _rgb("F2F2F2"),
+                                  "textFormat": {"italic": True, "fontSize": 9,
+                                                 "foregroundColor": _rgb("555555")},
+                                  "horizontalAlignment": "CENTER"}}
+
+
+def _tech_row_requests(gid, info, need_insert):
+    """Requests para crear/actualizar la fila 3 (info técnica) y formatear encabezados.
+
+    info: dict con surface_hab, surface_terreno, habitaciones, banos.
+    need_insert: True si hay que insertar físicamente una fila nueva en la posición 3.
+    """
+    reqs = []
+    if need_insert:
+        # Inserta una fila en la posición 3 (índice 2); desplaza encabezados/datos hacia abajo.
+        reqs.append({"insertDimension": {"range": {
+            "sheetId": gid, "dimension": "ROWS", "startIndex": 2, "endIndex": 3},
+            "inheritFromBefore": False}})
+    sup = (info.get("surface_hab") or "").strip()
+    terr = (info.get("surface_terreno") or "").strip()
+    hab = (info.get("habitaciones") or "").strip()
+    ban = (info.get("banos") or "").strip()
+    texts = [
+        f"📐 Surface: {sup} m²" if sup else "",
+        f"🌿 Terrain: {terr} m²" if terr else "",
+        f"🛏 Habitaciones: {hab}" if hab else "",
+        f"🚿 Baños: {ban}" if ban else "",
+    ] + [""] * 8  # E3..L3 vacías, mismo estilo gris
+    reqs.append({"updateCells": {
+        "rows": [{"values": [_tech_cell(t) for t in texts]}],
+        "fields": "userEnteredValue,userEnteredFormat",
+        "start": {"sheetId": gid, "rowIndex": 2, "columnIndex": 0}}})
+    # Encabezados (fila 4, índice 3): fondo verde oscuro #1A6B5F, texto blanco, negrita.
+    reqs.append({"repeatCell": {
+        "range": {"sheetId": gid, "startRowIndex": 3, "endRowIndex": 4,
+                  "startColumnIndex": 0, "endColumnIndex": 12},
+        "cell": {"userEnteredFormat": {"backgroundColor": _rgb("1A6B5F"),
+                                       "textFormat": {"bold": True, "foregroundColor": _rgb("FFFFFF")},
+                                       "horizontalAlignment": "CENTER"}},
+        "fields": "userEnteredFormat(backgroundColor,textFormat,horizontalAlignment)"}})
+    # Congela las 4 primeras filas (los datos empiezan a desplazarse en la fila 5).
+    reqs.append({"updateSheetProperties": {
+        "properties": {"sheetId": gid, "gridProperties": {"frozenRowCount": 4}},
+        "fields": "gridProperties.frozenRowCount"}})
+    return reqs
+
+
+def _ensure_tech_row_requests(ws, info):
+    """Devuelve los requests para garantizar la fila 3 de info técnica (idempotente).
+
+    Detecta dónde están los encabezados:
+      - en la fila 3  -> hay que INSERTAR la fila 3 (aún no migrada),
+      - en la fila 4  -> ya migrada, solo se reescribe el contenido,
+      - en otro sitio -> no se toca (evita corromper).
+    """
+    hr = _header_row(ws)
+    if hr == config.TECH_ROW:          # encabezados en fila 3 -> insertar
+        return _tech_row_requests(ws.id, info, need_insert=True)
+    if hr == config.HEADER_ROW:        # ya migrada (encabezados en fila 4)
+        return _tech_row_requests(ws.id, info, need_insert=False)
+    return []                           # estructura inesperada: no tocar
 
 
 def sync_sheets(stats):
@@ -1006,6 +1097,73 @@ def sync_sheets(stats):
             print(f"[sync] échec mise en page '{t}': {e}")
 
 
+def rebuild_menu():
+    """Reconstruye la pestaña Menú: sección de activos y de vendidos, por ciudad.
+
+    Cada inmueble muestra su nombre (con enlace a su hoja) y una línea de info técnica
+    "📐 m² | 🌿 terreno | 🛏 hab | 🚿 baños". Best-effort: si no hay pestaña Menú, no hace nada.
+    Devuelve {status, active, sold}.
+    """
+    import database as dbm
+    ss = _get_spreadsheet()
+    menu = next((w for w in _all_worksheets() if w.title.strip().lower() in ("menú", "menu")), None)
+    if menu is None:
+        return {"status": "skip", "reason": "no_menu"}
+    cc = config.CONFIG_COL
+    city_names = dbm.get_city_names()
+    gid_by_title = {w.title.strip().lower(): w.id for w in _all_worksheets()}
+
+    active, sold = [], []
+    for row in load_config_rows():
+        def g(idx):
+            return (row[idx] if idx < len(row) else "").strip()
+        name = g(cc["feuille"])
+        if not name:
+            continue
+        parts = []
+        if g(cc["surface_hab"]):
+            parts.append(f"📐 {g(cc['surface_hab'])} m²")
+        if g(cc["surface_terreno"]):
+            parts.append(f"🌿 {g(cc['surface_terreno'])} m² terrain")
+        if g(cc["habitaciones"]):
+            parts.append(f"🛏 {g(cc['habitaciones'])} ch")
+        if g(cc["banos"]):
+            parts.append(f"🚿 {g(cc['banos'])} bains")
+        item = {"name": name, "tech": " | ".join(parts),
+                "city": config.parse_bien_info(name, city_names)["city"],
+                "gid": gid_by_title.get(name.strip().lower())}
+        (sold if name.lower().startswith("vend ") else active).append(item)
+    active.sort(key=lambda x: x["city"].lower())
+    sold.sort(key=lambda x: x["city"].lower())
+
+    rows = []  # cada elemento es (celda A, celda B)
+    rows.append((_cell("🏠 Inmuebles activos", "1F4E78", white=True, size=12), _cell("", "1F4E78")))
+    for it in active:
+        link = f"#gid={it['gid']}" if it["gid"] is not None else None
+        rows.append((_cell(it["name"], "FFFFFF", white=False, link=link),
+                     _cell(it["tech"], "FFFFFF", white=False, size=9)))
+    rows.append((_cell("", "FFFFFF"), _cell("", "FFFFFF")))
+    rows.append((_cell("✅ Inmuebles vendidos", "375623", white=True, size=12), _cell("", "375623")))
+    for it in sold:
+        link = f"#gid={it['gid']}" if it["gid"] is not None else None
+        rows.append((_cell(it["name"], "E2EFDA", white=False, link=link),
+                     _cell(it["tech"], "E2EFDA", white=False, size=9)))
+
+    _write_throttle()
+    menu.batch_clear(["A1:B300"])
+    reqs = []
+    for idx, (a, b) in enumerate(rows):
+        reqs.append({"updateCells": {
+            "rows": [{"values": [a, b]}],
+            "fields": "userEnteredValue,userEnteredFormat,textFormatRuns",
+            "start": {"sheetId": menu.id, "rowIndex": idx, "columnIndex": 0}}})
+    if reqs:
+        _write_throttle()
+        ss.batch_update({"requests": reqs})
+    print(f"[menu] reconstruido — activos={len(active)} vendidos={len(sold)}")
+    return {"status": "ok", "active": len(active), "sold": len(sold)}
+
+
 def sync_all_sheets():
     """Sincroniza la navegación (fila 1) y la descripción (col B Config) en TODAS las hojas.
 
@@ -1051,11 +1209,23 @@ def sync_all_sheets():
                 touched = True
                 print(f"[sync] {t} → Config col B mis à jour : \"{title2}\"")
 
-            # 2) Cabecera de navegación (fila 1) + ref N1.
+            # 2) Cabecera de navegación (fila 1) + vaciado de la antigua celda N1.
             reqs = _layout_requests(ws.id, menu_gid,
                                     g(cc["url_idealista"]), g(cc["url_fotocasa"]), g(cc["ref_idealista"]))
+            # Vacía N1 (valor + formato + runs) por si quedó de versiones anteriores.
+            reqs.append({"updateCells": {
+                "rows": [{"values": [{}]}],
+                "fields": "userEnteredValue,userEnteredFormat,textFormatRuns",
+                "start": {"sheetId": ws.id, "rowIndex": 0, "columnIndex": 13}}})
+            # 3) Fila 3 (info técnica) — inserción idempotente desde Config M/N/O/P.
+            info = {"surface_hab": g(cc["surface_hab"]),
+                    "surface_terreno": g(cc["surface_terreno"]),
+                    "habitaciones": g(cc["habitaciones"]),
+                    "banos": g(cc["banos"])}
+            reqs += _ensure_tech_row_requests(ws, info)
             _write_throttle()
             ss.batch_update({"requests": reqs})
+            _values_cache.pop(ws.title, None)  # filas desplazadas: invalida la cache
             navigation_updated += 1
             touched = True
             print(f"[sync] {t} → navigation mise à jour")
@@ -1065,8 +1235,16 @@ def sync_all_sheets():
         except Exception as e:  # noqa: BLE001
             print(f"[sync] échec '{t}': {e}")
 
+    # Reconstruye el Menú (activos / vendidos) al final.
+    menu_res = {}
+    try:
+        menu_res = rebuild_menu()
+    except Exception as e:  # noqa: BLE001
+        print(f"[menu] échec reconstruction: {e}")
+
     return {"status": "ok", "sheets_updated": sheets_updated,
-            "navigation_updated": navigation_updated, "config_updated": config_updated}
+            "navigation_updated": navigation_updated, "config_updated": config_updated,
+            "menu": menu_res}
 
 
 def _price_to_num(p):
@@ -1220,8 +1398,8 @@ def iter_prospects(feuille):
     if ws is None:
         return
     values = _values_for(ws)
-    # Los datos empiezan en la fila 4; las filas 1-3 estan reservadas.
-    start = config.DATA_START_ROW
+    # Primera fila de datos detectada dinámicamente (justo tras los encabezados).
+    start = _data_start(ws)
     for i, row in enumerate(values[start - 1:], start=start):
         def g(name):
             idx = config.COL[name] - 1

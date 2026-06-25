@@ -216,9 +216,14 @@ def parse_bien_info(sheet_name, city_names=None):
 # ---------------------------------------------------------------------------
 # Reglas de negocio
 # ---------------------------------------------------------------------------
-# Los datos de prospectos empiezan SIEMPRE en la fila 4.
-# Las filas 1, 2 y 3 (títulos/encabezados existentes) NUNCA deben modificarse.
-DATA_START_ROW = 4
+# Estructura de las hojas de prospecto (tras añadir la fila 3 de info técnica):
+#   Fila 1 = navegación, Fila 2 = título, Fila 3 = info técnica,
+#   Fila 4 = encabezados de columna, Fila 5+ = datos de prospectos.
+# El código detecta dinámicamente la fila de encabezados (busca "Nombre" en col A),
+# por lo que funciona ANTES y DESPUÉS de la migración; estos valores son los de destino.
+HEADER_ROW = 4        # fila de encabezados (antes 3)
+DATA_START_ROW = 5    # primera fila de datos (antes 4)
+TECH_ROW = 3          # fila de información técnica del inmueble
 
 # --- Estados del flujo conversacional en 3 pasos ---
 STATE_NEW = "Nuevo contacto"
