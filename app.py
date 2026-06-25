@@ -31,6 +31,7 @@ import json
 import socket
 import datetime
 import threading
+from functools import wraps
 
 from flask import Flask, jsonify, request, session, redirect
 from apscheduler.schedulers.background import BackgroundScheduler
@@ -93,6 +94,17 @@ def _authorized(req):
     if not token:
         return True
     return req.args.get("token") == token
+
+
+def ajax_login_required(f):
+    """Decorador para endpoints AJAX: si no hay sesión/token válido, responde SIEMPRE
+    JSON 401 {"error":"sesión expirada","redirect":"/login"} (nunca HTML)."""
+    @wraps(f)
+    def decorated(*args, **kwargs):
+        if not _authorized(request):
+            return jsonify({"error": "sesión expirada", "redirect": "/login"}), 401
+        return f(*args, **kwargs)
+    return decorated
 
 
 def _next_run():
@@ -212,6 +224,7 @@ def health():
 
 
 @app.route("/run", methods=["POST", "GET"])
+@ajax_login_required
 def manual_run():
     """Lanza el pipeline manualmente (ventana normal newer_than:1d).
 
@@ -229,6 +242,7 @@ def manual_run():
 
 
 @app.route("/full_scan", methods=["GET", "POST"])
+@ajax_login_required
 def full_scan():
     """Escaneo único de los últimos 30 días (newer_than:30d): procesa todos los leads.
 
@@ -248,6 +262,7 @@ def full_scan():
 
 
 @app.route("/reset_timestamp", methods=["POST"])
+@ajax_login_required
 def reset_timestamp():
     """Reinicia last_run_ts a 0: el próximo /run reprocesará los correos de las últimas 24h.
 
@@ -263,6 +278,7 @@ def reset_timestamp():
 
 
 @app.route("/send_report", methods=["GET", "POST"])
+@ajax_login_required
 def send_report_route():
     """Envía de inmediato por email el informe del último run.
 
@@ -287,6 +303,7 @@ def send_report_route():
 
 
 @app.route("/list_biens")
+@ajax_login_required
 def list_biens():
     """Lista los inmuebles activos leídos de Google Sheets.
 
@@ -305,6 +322,7 @@ def list_biens():
 
 
 @app.route("/check_bien")
+@ajax_login_required
 def check_bien():
     """Indica si un nombre de bien ya existe (Config u hoja). Param: ?name=..."""
     if not _authorized(request):
@@ -319,6 +337,7 @@ def check_bien():
 
 
 @app.route("/list_cities")
+@ajax_login_required
 def list_cities():
     """Devuelve el mapeo de ciudades (config + personalizadas)."""
     if not _authorized(request):
@@ -327,6 +346,7 @@ def list_cities():
 
 
 @app.route("/update_config", methods=["GET", "POST"])
+@ajax_login_required
 def update_config():
     """GET: devuelve la config editable (bróker). POST: guarda bróker y/o ciudad nueva."""
     if not _authorized(request):
@@ -353,6 +373,7 @@ def update_config():
 
 
 @app.route("/sync_all_sheets", methods=["POST"])
+@ajax_login_required
 def sync_all_sheets():
     """Reescribe la navegación (fila 1) y sincroniza la col B de Config en todas las hojas."""
     print(f"[sync_all_sheets] appelé — method={request.method} "
@@ -368,6 +389,7 @@ def sync_all_sheets():
 
 
 @app.route("/sync_iad_urls", methods=["GET", "POST"])
+@ajax_login_required
 def sync_iad_urls():
     """Scrapea el perfil IAD y sincroniza URLs/datos en la pestaña Config."""
     if not _authorized(request):
@@ -382,6 +404,7 @@ def sync_iad_urls():
 
 
 @app.route("/add_bien", methods=["POST"])
+@ajax_login_required
 def add_bien():
     """Añade un nuevo inmueble (crea su hoja/entrada en Google Sheets).
 
@@ -403,6 +426,7 @@ def add_bien():
 
 
 @app.route("/close_bien", methods=["POST"])
+@ajax_login_required
 def close_bien():
     """Marca un inmueble como vendido/cerrado en Google Sheets.
 
@@ -424,6 +448,7 @@ def close_bien():
 
 
 @app.route("/setup_dropdowns", methods=["GET", "POST"])
+@ajax_login_required
 def setup_dropdowns():
     """Aplica la lista desplegable "Estado final" + color en todas las hojas (1 sola vez).
 
@@ -444,6 +469,7 @@ def setup_dropdowns():
 
 
 @app.route("/test_email", methods=["GET", "POST"])
+@ajax_login_required
 def test_email():
     """Envío mínimo de email para aislar un problema de envío.
 
@@ -463,6 +489,7 @@ def test_email():
 
 
 @app.route("/status")
+@ajax_login_required
 def status():
     """Resumen del último run (sin depender del email).
 
@@ -476,6 +503,7 @@ def status():
 
 
 @app.route("/diag")
+@ajax_login_required
 def diag():
     """Diagnóstico completo: variables de entorno, acceso a Gmail y acceso a Sheets.
 
