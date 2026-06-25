@@ -18,6 +18,7 @@ Toda la lectura se apoya en una cache en memoria (se reinicia en cada
 ejecucion del pipeline) para minimizar las llamadas a la API de Google y
 respetar la cuota de peticiones.
 """
+import os
 import re
 import time
 import datetime
@@ -630,15 +631,18 @@ def setup_estado_validation():
             "condition": {"type": "ONE_OF_LIST",
                           "values": [{"userEnteredValue": v} for v in options]},
             "showCustomUi": True, "strict": False}}})
-        # Formato condicional: rojo claro #FF6B6B para "Error envío WA"
-        # (rgb 1.0 / 0.42 / 0.42 en escala 0-1).
-        requests.append({"addConditionalFormatRule": {"rule": {
-            "ranges": [rng],
-            "booleanRule": {
-                "condition": {"type": "TEXT_EQ",
-                              "values": [{"userEnteredValue": config.ERROR_WA_STATE}]},
-                "format": {"backgroundColor": {"red": 1.0, "green": 0.42, "blue": 0.42}}}},
-            "index": 0}})
+        # Formato condicional por estado (colores definidos en config.ESTADO_COLORS).
+        for estado, spec in config.ESTADO_COLORS.items():
+            r, g, b = spec["bg"]
+            fmt = {"backgroundColor": {"red": r, "green": g, "blue": b}}
+            if spec.get("white"):
+                fmt["textFormat"] = {"foregroundColor": {"red": 1, "green": 1, "blue": 1}, "bold": True}
+            requests.append({"addConditionalFormatRule": {"rule": {
+                "ranges": [rng],
+                "booleanRule": {
+                    "condition": {"type": "TEXT_EQ", "values": [{"userEnteredValue": estado}]},
+                    "format": fmt}},
+                "index": 0}})
         done.append(ws.title)
     if requests:
         _write_throttle()
@@ -654,8 +658,8 @@ def setup_estado_validation():
 # Regex para extraer una secuencia de 6 o mas digitos (la referencia de un
 # anuncio dentro de su URL). Nombre y patron NO se modifican.
 _RE_URL_DIGITS = re.compile(r"(\d{6,})")
-# Titulo exacto de la hoja plantilla que se duplica al dar de alta un bien.
-BIEN_TEMPLATE = "T Ole 155k"
+# Titulo de la hoja plantilla que se duplica al dar de alta un bien.
+BIEN_TEMPLATE = os.environ.get("BIEN_TEMPLATE", "Hoja ejemplo")
 
 
 def _ref_from_url(url):
@@ -674,6 +678,17 @@ def _ref_from_url(url):
         return ""
     found = _RE_URL_DIGITS.findall(url)
     return found[-1] if found else ""
+
+
+def bien_exists(name):
+    """Indica si un bien ya existe (en la pestaña Config o como hoja)."""
+    target = (name or "").strip().lower()
+    if not target:
+        return False
+    for row in load_config_rows():
+        if (row[0] if row else "").strip().lower() == target:
+            return True
+    return worksheet_exists(name)
 
 
 def list_active_biens():
@@ -745,6 +760,30 @@ def add_bien(data):
     _write_throttle()
     new_ws.update(range_name="A2", values=[[desc]], value_input_option="USER_ENTERED")
 
+    # Formato del titulo (fila 2): fusion A2:L2, fondo amarillo, negrita, centrado.
+    gid = new_ws.id
+    title_range = {"sheetId": gid, "startRowIndex": 1, "endRowIndex": 2,
+                   "startColumnIndex": 0, "endColumnIndex": 12}
+    fmt_reqs = [
+        {"unmergeCells": {"range": title_range}},
+        {"mergeCells": {"mergeType": "MERGE_ALL", "range": title_range}},
+        {"repeatCell": {"range": title_range,
+                        "cell": {"userEnteredFormat": {
+                            "backgroundColor": _rgb("FFFF00"),
+                            "textFormat": {"bold": True},
+                            "horizontalAlignment": "CENTER"}},
+                        "fields": "userEnteredFormat(backgroundColor,textFormat,horizontalAlignment)"}},
+    ]
+    # Cabecera de navegacion (fila 1) + ref N1 para la hoja recien creada.
+    menu_gid = next((w.id for w in _all_worksheets()
+                     if w.title.strip().lower() in ("menú", "menu")), None)
+    fmt_reqs += _layout_requests(gid, menu_gid, url_idea, url_foto, _ref_from_url(url_idea))
+    try:
+        _write_throttle()
+        ss.batch_update({"requests": fmt_reqs})
+    except Exception as e:  # noqa: BLE001
+        print(f"[add_bien] mise en page échouée pour '{nom}': {e}")
+
     # Fila correspondiente en la pestana Config.
     config_ws = _get_config_worksheet()
     new_row = [
@@ -805,6 +844,114 @@ def close_bien(nom):
             break
     reset_cache()
     return f"Bien clôturé : {new_title}"
+
+
+# ---------------------------------------------------------------------------
+# Sincronización Config <-> hojas + cabecera de navegación (fila 1) + ref (N1)
+# ---------------------------------------------------------------------------
+def _rgb(hexs):
+    """Convierte un color hex 'RRGGBB' en el dict {red,green,blue} (0-1) de la API."""
+    return {"red": int(hexs[0:2], 16) / 255,
+            "green": int(hexs[2:4], 16) / 255,
+            "blue": int(hexs[4:6], 16) / 255}
+
+
+def _cell(value, bg_hex, white=True, size=None, is_formula=True):
+    """Construye un dict de celda (valor + formato) para updateCells."""
+    uev = {"formulaValue": value} if is_formula else {"stringValue": value}
+    tf = {"bold": True, "foregroundColor": _rgb("FFFFFF" if white else "000000")}
+    if size:
+        tf["fontSize"] = size
+    return {"userEnteredValue": uev,
+            "userEnteredFormat": {"backgroundColor": _rgb(bg_hex),
+                                  "textFormat": tf, "horizontalAlignment": "CENTER"}}
+
+
+def _layout_requests(gid, menu_gid, url_idea, url_foto, ref_idea):
+    """Construye los requests de batch_update para la fila 1 (navegación) y N1 (ref)."""
+    reqs = []
+    row1 = {"sheetId": gid, "startRowIndex": 0, "endRowIndex": 1,
+            "startColumnIndex": 0, "endColumnIndex": 12}
+    # 1) Deshacer la fusión actual A1:L1 (si la hay) y crear dos fusiones nuevas.
+    reqs.append({"unmergeCells": {"range": row1}})
+    reqs.append({"mergeCells": {"mergeType": "MERGE_ALL", "range": {
+        "sheetId": gid, "startRowIndex": 0, "endRowIndex": 1, "startColumnIndex": 0, "endColumnIndex": 5}}})
+    reqs.append({"mergeCells": {"mergeType": "MERGE_ALL", "range": {
+        "sheetId": gid, "startRowIndex": 0, "endRowIndex": 1, "startColumnIndex": 5, "endColumnIndex": 12}}})
+    # 2) A1:E1 -> "Volver al Menú" con hyperlink interno (#gid=...) fondo azul oscuro.
+    menu_formula = (f'=HYPERLINK("#gid={menu_gid}","🏠 Volver al Menú")'
+                    if menu_gid is not None else "🏠 Volver al Menú")
+    reqs.append({"updateCells": {
+        "rows": [{"values": [_cell(menu_formula, "1F4E78", white=True,
+                                   is_formula=menu_gid is not None)]}],
+        "fields": "userEnteredValue,userEnteredFormat",
+        "start": {"sheetId": gid, "rowIndex": 0, "columnIndex": 0}}})
+    # 3) F1:L1 -> "Ver anuncio". Prioridad Idealista, luego Fotocasa; si no, gris sin enlace.
+    if url_idea:
+        anuncio = _cell(f'=HYPERLINK("{url_idea}","🔗 Ver anuncio en Idealista")', "00B1EB", white=True)
+    elif url_foto:
+        anuncio = _cell(f'=HYPERLINK("{url_foto}","🔗 Ver anuncio en Fotocasa")', "00B1EB", white=True)
+    else:
+        anuncio = _cell("🔗 Ver anuncio", "CCCCCC", white=False, is_formula=False)
+    reqs.append({"updateCells": {
+        "rows": [{"values": [anuncio]}],
+        "fields": "userEnteredValue,userEnteredFormat",
+        "start": {"sheetId": gid, "rowIndex": 0, "columnIndex": 5}}})
+    # 4) N1 -> "Ref. Idealista: XXXX" fondo azul claro, texto blanco, tamaño 9.
+    if ref_idea:
+        reqs.append({"updateCells": {
+            "rows": [{"values": [_cell(f"Ref. Idealista: {ref_idea}", "00B1EB",
+                                       white=True, size=9, is_formula=False)]}],
+            "fields": "userEnteredValue,userEnteredFormat",
+            "start": {"sheetId": gid, "rowIndex": 0, "columnIndex": 13}}})  # col N
+    return reqs
+
+
+def sync_sheets(stats):
+    """Sincroniza, en cada run completo: descripción Config (col B) = fila 2 de la hoja,
+    y reescribe la cabecera de navegación (fila 1) + la celda N1 con la ref de Idealista.
+    Aísla cada hoja en try/except para que un fallo de formato no bloquee el pipeline.
+    """
+    ss = _get_spreadsheet()
+    cc = config.CONFIG_COL
+    menu_gid = next((w.id for w in _all_worksheets()
+                     if w.title.strip().lower() in ("menú", "menu")), None)
+    config_ws = _get_config_worksheet()
+    cfg_values = config_ws.get_all_values()
+    cfg_index = {}
+    for i, row in enumerate(cfg_values[1:], start=2):
+        name = (row[cc["feuille"]] if cc["feuille"] < len(row) else "").strip()
+        if name:
+            cfg_index[name.lower()] = (i, row)
+
+    for ws in _all_worksheets():
+        t = ws.title
+        if "config" in t.lower() or t.strip().lower() in ("menú", "menu"):
+            continue
+        try:
+            entry = cfg_index.get(t.strip().lower())
+            cfg_row = entry[1] if entry else []
+
+            def g(idx):
+                return (cfg_row[idx] if idx < len(cfg_row) else "").strip()
+
+            # A) Sincroniza la descripción (col B Config) con la fila 2 (A2) de la hoja.
+            vals = _values_for(ws)
+            title2 = (vals[1][0] if len(vals) > 1 and vals[1] else "").strip()
+            if entry and title2 and title2 != g(cc["description"]):
+                _write_throttle()
+                config_ws.update_cell(entry[0], cc["description"] + 1, title2)
+                print(f"[config] mise à jour description '{t}'")
+                stats.setdefault("details", []).append(f"Config descripción actualizada: {t}")
+
+            # B+C) Cabecera de navegación (fila 1) + ref en N1.
+            reqs = _layout_requests(ws.id, menu_gid,
+                                    g(cc["url_idealista"]), g(cc["url_fotocasa"]), g(cc["ref_idealista"]))
+            _write_throttle()
+            ss.batch_update({"requests": reqs})
+        except Exception as e:  # noqa: BLE001
+            stats.setdefault("errors", []).append(f"sync_sheets {t}: {e}")
+            print(f"[sync] échec mise en page '{t}': {e}")
 
 
 def diag():

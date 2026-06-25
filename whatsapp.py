@@ -230,3 +230,90 @@ def send_message(phone, body):
     except Exception as e:  # noqa: BLE001
         # Cualquier error de red/excepción se captura y se devuelve como fallo.
         return False, f"exception: {e}"
+
+
+# ---------------------------------------------------------------------------
+# Flujo conversacional en 3 pasos — plantillas por tipo de inmueble
+# ---------------------------------------------------------------------------
+# PASO 1: primer contacto adaptado al tipo (3 variantes al azar). {nombre}{url}{ville}.
+# Mensajes para el cliente: NO modificar su contenido.
+FIRST_CONTACT_BY_TYPE = {
+    "Terreno": [
+        "Hola {nombre} 👋 Te escribo porque contactaste con nosotros por {url} — un terreno en {ville}. ¿Sigue siendo de tu interés?",
+        "Hola {nombre} 😊 Vi que te interesó el terreno en {ville}: {url} ¿Sigues buscando terreno en la zona?",
+        "Hola {nombre}, te contacto por el terreno en {ville}: {url} ¿Te sigue interesando?",
+    ],
+    "Casa": [
+        "Hola {nombre} 👋 Te escribo porque contactaste con nosotros por {url} — una casa en {ville}. ¿Sigue siendo de tu interés?",
+        "Hola {nombre} 😊 Vi que te interesó la casa en {ville}: {url} ¿Sigues buscando en la zona?",
+        "Hola {nombre}, te contacto por la casa en {ville}: {url} ¿Te sigue interesando?",
+    ],
+    "Piso": [
+        "Hola {nombre} 👋 Te escribo porque contactaste con nosotros por {url} — un piso en {ville}. ¿Sigue siendo de tu interés?",
+        "Hola {nombre} 😊 Vi que te interesó el piso en {ville}: {url} ¿Sigues buscando piso en la zona?",
+        "Hola {nombre}, te contacto por el piso en {ville}: {url} ¿Te sigue interesando?",
+    ],
+    "Parking": [
+        "Hola {nombre} 👋 Te escribo porque contactaste con nosotros por {url} — un parking en {ville}. ¿Sigue siendo de tu interés?",
+        "Hola {nombre} 😊 Vi que te interesó el parking en {ville}: {url} ¿Sigue disponible para ti?",
+        "Hola {nombre}, te contacto por el parking en {ville}: {url} ¿Te sigue interesando?",
+    ],
+    "Local": [
+        "Hola {nombre} 👋 Te escribo porque contactaste con nosotros por {url} — un local en {ville}. ¿Sigue siendo de tu interés?",
+        "Hola {nombre} 😊 Vi que te interesó el local comercial en {ville}: {url} ¿Sigues buscando local en la zona?",
+        "Hola {nombre}, te contacto por el local en {ville}: {url} ¿Te sigue interesando?",
+    ],
+}
+
+# PASO 2: preguntas de cualificación, según el tipo. Mensajes para el cliente: NO modificar.
+PASO2_TERRENO = (
+    "¡Perfecto! Para ayudarte mejor con el terreno en {ville}, cuéntame un poco más 😊\n"
+    "¿Para qué lo necesitas — construcción, inversión, agricultura? ¿Cuánto tiempo llevas "
+    "buscando? ¿Tienes ya claro el presupuesto? ¿Has hablado con algún banco o bróker para la financiación?"
+)
+PASO2_CASA_PISO = (
+    "¡Perfecto! Para ayudarte mejor con {type_bien} en {ville}, cuéntame un poco más 😊\n"
+    "¿Cuántas habitaciones necesitas? ¿Cuánto tiempo llevas buscando? ¿Tienes ya claro el "
+    "presupuesto? ¿Has hablado con algún banco o bróker para la financiación?"
+)
+PASO2_PARKING_LOCAL = (
+    "¡Perfecto! Para ayudarte mejor, cuéntame un poco más 😊\n"
+    "¿Es para uso personal o profesional? ¿Cuánto tiempo llevas buscando? ¿Tienes ya claro el presupuesto?"
+)
+
+# Mensaje del bróker (financiación). {BROKER_NAME}{BROKER_PHONE}. NO modificar el texto base.
+BROKER_MESSAGE = (
+    "¡Perfecto! Puedo ayudarte con la financiación 😊 Te recomiendo contactar directamente con "
+    "mi bróker de confianza, se encargará de encontrarte la mejor financiación y te hará un "
+    "estudio gratuito sin compromiso. Se llama {BROKER_NAME} y su número es: {BROKER_PHONE} 📞"
+)
+
+
+def build_first_contact_typed(nombre, url, ville, type_name):
+    """Construye el mensaje de PRIMER CONTACTO (Paso 1) adaptado al tipo de inmueble.
+
+    Elige una variante al azar de la lista del tipo (o las genéricas si el tipo
+    no se reconoce) y la rellena con nombre, url y ciudad.
+    """
+    plantillas = FIRST_CONTACT_BY_TYPE.get(type_name) or FIRST_CONTACT
+    return random.choice(plantillas).format(
+        nombre=_name_or_fallback(nombre), url=url or "", ville=ville or "la zona")
+
+
+def build_paso2(ville, type_code, type_name, article):
+    """Construye el mensaje de cualificación (Paso 2) según el tipo de inmueble."""
+    if type_code == "T":
+        return PASO2_TERRENO.format(ville=ville or "la zona")
+    if type_code in ("C", "P"):
+        # type_bien = artículo + nombre en minúscula, p. ej. "la casa" / "el piso".
+        type_bien = f"{article or 'el'} {(type_name or 'inmueble').lower()}"
+        return PASO2_CASA_PISO.format(ville=ville or "la zona", type_bien=type_bien)
+    if type_code in ("Pa", "L"):
+        return PASO2_PARKING_LOCAL
+    # Tipo desconocido: usa la plantilla casa/piso con un término genérico.
+    return PASO2_CASA_PISO.format(ville=ville or "la zona", type_bien="el inmueble")
+
+
+def build_broker_message(broker_name, broker_phone):
+    """Construye el mensaje que recomienda al bróker de financiación."""
+    return BROKER_MESSAGE.format(BROKER_NAME=broker_name, BROKER_PHONE=broker_phone)

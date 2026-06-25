@@ -77,6 +77,38 @@ Mensaje(s) del prospecto:
 Responde solo con el JSON."""
 
 
+# Palabras/expresiones para clasificar la respuesta al Paso 1 (interés sí/no).
+# El orden importa: primero NEGATIVAS (p. ej. "no me interesa" contiene "me interesa").
+_NEGATIVE_KW = [
+    "no me interesa", "ya no", "ya compré", "ya compre", "compré otra", "compre otra",
+    "encontré", "encontre", "no gracias", "no, ", "descartar", "no quiero", "déjalo", "dejalo",
+]
+_POSITIVE_KW = [
+    "sí", "si ", "claro", "me interesa", "sigue", "interesa", "vale", "perfecto",
+    "por supuesto", "quiero", "disponible", "adelante", "ok",
+]
+
+
+def classify_paso1(text):
+    """Clasifica la respuesta al primer contacto como 'positive', 'negative' o 'unknown'.
+
+    Usa coincidencia de palabras clave (primero negativas, luego positivas).
+
+    Parámetros:
+        text (str): texto de la respuesta del prospecto.
+    Devuelve:
+        str: "positive", "negative" o "unknown".
+    """
+    t = " " + (text or "").lower().strip() + " "
+    for kw in _NEGATIVE_KW:
+        if kw in t:
+            return "negative"
+    for kw in _POSITIVE_KW:
+        if kw in t:
+            return "positive"
+    return "unknown"
+
+
 def _parse_json(text):
     """Extrae y parsea el objeto JSON contenido en la respuesta de la IA.
 

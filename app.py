@@ -116,17 +116,18 @@ def _next_run():
     return nxt.replace(hour=hours[0], minute=0, second=0, microsecond=0)
 
 
-def _run_pipeline_async(dry_run=False, full_scan=False):
+def _run_pipeline_async(dry_run=False, full_scan=False, replies_only=False):
     """Ejecuta el pipeline en un hilo aparte para no bloquear al scheduler ni a Flask.
 
     Parámetros:
-      dry_run   -- si True, simula sin enviar WhatsApp (modo prueba).
-      full_scan -- si True, escanea los últimos 30 días en lugar del día actual.
+      dry_run      -- si True, simula sin enviar WhatsApp (modo prueba).
+      full_scan    -- si True, escanea los últimos 30 días en lugar del día actual.
+      replies_only -- si True, solo procesa respuestas (runs de 10h/15h).
     Devuelve: None (el trabajo continúa en un hilo daemon en segundo plano).
     """
     threading.Thread(
         target=pipeline.run,
-        kwargs={"dry_run": dry_run, "full_scan": full_scan},
+        kwargs={"dry_run": dry_run, "full_scan": full_scan, "replies_only": replies_only},
         daemon=True,
     ).start()
 
@@ -146,17 +147,24 @@ def start_scheduler():
     """
     tz = pytz.timezone(config.TIMEZONE)
     scheduler = BackgroundScheduler(timezone=tz)
-    # Construye la cadena de horas "8,12,18" que entiende el CronTrigger.
-    hours = ",".join(str(h) for h in config.RUN_HOURS)
+    # Dos trabajos cron distintos:
+    #  - runs COMPLETOS a las horas de FULL_RUN_HOURS (8/12/18)
+    #  - runs SOLO RESPUESTAS a las horas de REPLIES_ONLY_HOURS (10/15)
+    full_hours = ",".join(str(h) for h in sorted(config.FULL_RUN_HOURS))
+    replies_hours = ",".join(str(h) for h in sorted(config.REPLIES_ONLY_HOURS))
     scheduler.add_job(
-        _run_pipeline_async,
-        CronTrigger(hour=hours, minute=0, timezone=tz),
-        id="crm_pipeline",
-        replace_existing=True,
-        misfire_grace_time=3600,
+        lambda: _run_pipeline_async(replies_only=False),
+        CronTrigger(hour=full_hours, minute=0, timezone=tz),
+        id="crm_pipeline_full", replace_existing=True, misfire_grace_time=3600,
     )
+    if replies_hours:
+        scheduler.add_job(
+            lambda: _run_pipeline_async(replies_only=True),
+            CronTrigger(hour=replies_hours, minute=0, timezone=tz),
+            id="crm_pipeline_replies", replace_existing=True, misfire_grace_time=3600,
+        )
     scheduler.start()
-    print(f"[scheduler] démarré — runs à {hours}h ({config.TIMEZONE})")
+    print(f"[scheduler] démarré — full à {full_hours}h, réponses à {replies_hours}h ({config.TIMEZONE})")
     return scheduler
 
 
@@ -294,6 +302,49 @@ def list_biens():
         return jsonify({"biens": sheets_handler.list_active_biens()})
     except Exception as e:  # noqa: BLE001
         return jsonify({"biens": [], "error": str(e)}), 500
+
+
+@app.route("/check_bien")
+def check_bien():
+    """Indica si un nombre de bien ya existe (Config u hoja). Param: ?name=..."""
+    if not _authorized(request):
+        return jsonify({"error": "unauthorized"}), 401
+    import sheets_handler
+    name = request.args.get("name", "")
+    try:
+        sheets_handler.reset_cache()
+        return jsonify({"exists": sheets_handler.bien_exists(name), "name": name})
+    except Exception as e:  # noqa: BLE001
+        return jsonify({"exists": False, "error": str(e)}), 500
+
+
+@app.route("/list_cities")
+def list_cities():
+    """Devuelve el mapeo de ciudades (config + personalizadas)."""
+    if not _authorized(request):
+        return jsonify({"error": "unauthorized"}), 401
+    return jsonify({"cities": db.get_city_names()})
+
+
+@app.route("/update_config", methods=["GET", "POST"])
+def update_config():
+    """GET: devuelve la config editable (bróker). POST: guarda bróker y/o ciudad nueva."""
+    if not _authorized(request):
+        return jsonify({"error": "unauthorized"}), 401
+    if request.method == "POST":
+        data = request.get_json(silent=True) or request.form.to_dict() or {}
+        msgs = []
+        if data.get("broker_name") or data.get("broker_phone"):
+            db.set_broker(data.get("broker_name"), data.get("broker_phone"))
+            msgs.append("bróker actualizado")
+        if data.get("new_city_abbrev") and data.get("new_city_full"):
+            db.add_custom_city(data["new_city_abbrev"], data["new_city_full"])
+            msgs.append(f"ciudad añadida: {data['new_city_full']}")
+        bn, bp = db.get_broker()
+        return jsonify({"status": "ok", "message": "; ".join(msgs) or "sin cambios",
+                        "broker_name": bn, "broker_phone": bp})
+    bn, bp = db.get_broker()
+    return jsonify({"broker_name": bn, "broker_phone": bp})
 
 
 @app.route("/add_bien", methods=["POST"])
@@ -566,6 +617,16 @@ text-decoration:none;padding:11px 18px;border-radius:8px;font-weight:bold;font-s
   <a class="extbtn" href="https://www.iadespana.es/agente-inmobiliario/thibaut.montalat" target="_blank">👤 Ma page IAD ↗</a>
 </div>
 
+<!-- Configuración (bróker) -->
+<div class="card">
+  <h3>⚙️ Configuración</h3>
+  <label style="font-size:12px;color:#666;">Nombre del bróker</label>
+  <input id="cfg_broker_name" style="width:100%;box-sizing:border-box;padding:10px;border:1px solid #ddd;border-radius:6px;margin-bottom:8px;">
+  <label style="font-size:12px;color:#666;">Teléfono del bróker</label>
+  <input id="cfg_broker_phone" style="width:100%;box-sizing:border-box;padding:10px;border:1px solid #ddd;border-radius:6px;margin-bottom:10px;">
+  <button class="btn" onclick="saveConfig()">💾 Guardar configuración</button>
+</div>
+
 <!-- Tests & Simulation (bas de page) -->
 <div class="card" style="background:var(--gray);border:1px solid var(--orange);">
   <h3 style="border-color:var(--orange);">🧪 Tests &amp; Simulation</h3>
@@ -579,18 +640,37 @@ text-decoration:none;padding:11px 18px;border-radius:8px;font-weight:bold;font-s
   <p style="font-size:12px;color:#9a6b00;margin:12px 0 0;">⚠️ Ces actions sont réservées aux tests — ne pas utiliser en production courante</p>
 </div>
 
-<!-- Modal Ajouter un bien -->
+<!-- Modal Ajouter un bien (formulario completo con generación en tiempo real) -->
 <div id="addModal" class="modal"><div class="modalbox">
-  <h3>➕ Ajouter un nouveau bien</h3>
-  <label>Nom de la feuille *</label><input id="ab_nom" placeholder="ex: T Roses 250k">
-  <label>Description *</label><input id="ab_desc" placeholder="ex: Terreno Roses 250k">
-  <label>URL Idealista</label><input id="ab_idea" placeholder="optionnel (réf auto)">
-  <label>URL Fotocasa</label><input id="ab_foto" placeholder="optionnel">
-  <label>URL Habitaclia</label><input id="ab_habi" placeholder="optionnel">
-  <label>URL IAD</label><input id="ab_iad" placeholder="optionnel">
+  <h3>➕ Añadir un nuevo inmueble</h3>
+  <label>Tipo *</label>
+  <select id="ab_type" onchange="updatePreview()">
+    <option value="T">T — Terreno</option>
+    <option value="C">C — Casa</option>
+    <option value="P">P — Piso</option>
+    <option value="Pa">Pa — Parking</option>
+    <option value="L">L — Local</option>
+  </select>
+  <label>Ciudad *</label>
+  <select id="ab_city" onchange="onCityChange()"></select>
+  <div id="ab_newcity" style="display:none;">
+    <input id="ab_city_full" oninput="updatePreview()" placeholder="Nombre completo (ej: Roses)">
+    <input id="ab_city_abbr" maxlength="6" oninput="updatePreview()" placeholder="Abreviación (máx 6, ej: roses)">
+  </div>
+  <label>Precio (€) *</label><input id="ab_price" type="number" oninput="updatePreview()" placeholder="ej: 55000">
+  <label>Nombre del propietario *</label><input id="ab_owner" oninput="updatePreview()" placeholder="ej: Juan García">
+  <label>URL Idealista *</label><input id="ab_idea" oninput="updatePreview()" placeholder="OBLIGATORIA">
+  <label>URL Fotocasa</label><input id="ab_foto" placeholder="opcional">
+  <label>URL Habitaclia</label><input id="ab_habi" placeholder="opcional">
+  <label>URL IAD</label><input id="ab_iad" placeholder="opcional">
+  <div style="background:#f5f5f5;padding:8px;border-radius:6px;font-size:13px;margin:10px 0;">
+    <div>Hoja: <b id="pv_name">—</b></div>
+    <div>Título: <b id="pv_title">—</b></div>
+    <div id="pv_err" style="color:#DC3545;margin-top:4px;"></div>
+  </div>
   <div class="modalbtns">
-    <button class="btn gray" onclick="closeModal('addModal')">Annuler</button>
-    <button class="btn" onclick="submitAddBien()">Ajouter</button>
+    <button class="btn gray" onclick="closeModal('addModal')">Cancelar</button>
+    <button class="btn" id="ab_submit" onclick="submitAddBien()">Añadir</button>
   </div>
 </div></div>
 
@@ -669,7 +749,7 @@ async function act(method,url,label){
 }
 function val(id){return document.getElementById(id).value.trim();}
 function showResult(label,j){const res=document.getElementById('result');res.style.display='block';res.textContent=label+' →\n'+JSON.stringify(j,null,2);}
-function openModal(id){document.getElementById(id).classList.add('show');if(id==='closeModal')loadBiens();}
+function openModal(id){document.getElementById(id).classList.add('show');if(id==='closeModal')loadBiens();if(id==='addModal'){loadCities();updatePreview();}}
 function closeModal(id){document.getElementById(id).classList.remove('show');}
 async function loadBiens(){
   try{const r=await (await fetch('/list_biens')).json();
@@ -678,16 +758,75 @@ async function loadBiens(){
     sel.innerHTML = biens.length ? biens.map(b=>'<option>'+esc(b)+'</option>').join('') : '<option value="">(aucun bien actif)</option>';
   }catch(e){}
 }
+// --- Gestión de inmuebles: ciudades, abreviaturas, vista previa en tiempo real ---
+const TYPE_NAMES={T:'Terreno',C:'Casa',P:'Piso',Pa:'Parking',L:'Local'};
+async function loadCities(){
+  try{const r=await (await fetch('/list_cities')).json();
+    const c=r.cities||{}; const sel=document.getElementById('ab_city');
+    let opts=Object.keys(c).sort().map(k=>'<option value="'+esc(k)+'" data-full="'+esc(c[k])+'">'+esc(c[k])+'</option>').join('');
+    opts+='<option value="__new__">➕ Agregar nueva ciudad</option>';
+    sel.innerHTML=opts; onCityChange();
+  }catch(e){}
+}
+function onCityChange(){
+  const sel=document.getElementById('ab_city');
+  document.getElementById('ab_newcity').style.display = sel.value==='__new__' ? 'block':'none';
+  updatePreview();
+}
+function curCityAbbr(){const s=document.getElementById('ab_city');return s.value==='__new__'?val('ab_city_abbr').toLowerCase():s.value;}
+function curCityFull(){const s=document.getElementById('ab_city');if(s.value==='__new__')return val('ab_city_full');const o=s.options[s.selectedIndex];return o?(o.dataset.full||''):'';}
+function fmtThousands(p){return (parseInt(p,10)||0).toLocaleString('es-ES').replace(/\./g,' ');}
+function abbrevPrice(p){p=parseInt(p,10)||0;if(!p)return '';if(p<20000)return fmtThousands(p);return Math.floor(p/1000)+'k';}
+function fullPrice(p){p=parseInt(p,10)||0;if(!p)return '';return fmtThousands(p)+' €';}
+function capWords(s){return (s||'').split(' ').map(w=>w?w[0].toUpperCase()+w.slice(1):w).join(' ');}
+function genName(){const t=document.getElementById('ab_type').value;const a=capWords(curCityAbbr());const p=abbrevPrice(val('ab_price'));return (t+' '+a+' '+p).replace(/\s+/g,' ').trim();}
+function genTitle(){const t=TYPE_NAMES[document.getElementById('ab_type').value];return t+' / '+(curCityFull()||'—')+' / '+(val('ab_owner')||'—')+' / '+(fullPrice(val('ab_price'))||'—');}
+let _checkTimer=null;
+async function updatePreview(){
+  const name=genName();document.getElementById('pv_name').textContent=name||'—';
+  document.getElementById('pv_title').textContent=genTitle();
+  const err=document.getElementById('pv_err');const btn=document.getElementById('ab_submit');
+  let msg='';
+  if(!val('ab_idea')) msg='La URL de Idealista es obligatoria para poder enviar mensajes WhatsApp.';
+  if(err) err.textContent=msg;
+  if(btn) btn.disabled = !!msg;
+  // verifica existencia del nombre (con debounce)
+  clearTimeout(_checkTimer);
+  if(name && !msg){_checkTimer=setTimeout(async()=>{
+    try{const r=await (await fetch('/check_bien?name='+encodeURIComponent(name))).json();
+      if(r.exists){err.textContent='Ya existe un bien con el nombre "'+name+'".';if(btn)btn.disabled=true;}
+    }catch(e){}
+  },400);}
+}
 async function submitAddBien(){
-  const body={nom:val('ab_nom'),description:val('ab_desc'),url_idealista:val('ab_idea'),
-    url_fotocasa:val('ab_foto'),url_habitaclia:val('ab_habi'),url_iad:val('ab_iad')};
-  if(!body.nom||!body.description){alert('Nom et description obligatoires');return;}
+  const idea=val('ab_idea');
+  if(!idea){alert('La URL de Idealista es obligatoria para poder enviar mensajes WhatsApp.');return;}
+  const abbr=curCityAbbr(),cityFull=curCityFull(),price=val('ab_price'),owner=val('ab_owner');
+  if(!abbr||!price||!owner){alert('Completa tipo, ciudad, precio y propietario');return;}
   const sp=document.getElementById('spin');sp.style.display='block';
-  try{const r=await fetch('/add_bien',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
-    showResult('Ajout bien',await r.json());closeModal('addModal');
-    ['ab_nom','ab_desc','ab_idea','ab_foto','ab_habi','ab_iad'].forEach(i=>document.getElementById(i).value='');
-    loadBiens();}
-  catch(e){showResult('Ajout bien',{status:'error',message:String(e)});}
+  try{
+    if(document.getElementById('ab_city').value==='__new__'){
+      await fetch('/update_config',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({new_city_abbrev:abbr,new_city_full:cityFull})});
+    }
+    const body={nom:genName(),description:genTitle(),url_idealista:idea,
+      url_fotocasa:val('ab_foto'),url_habitaclia:val('ab_habi'),url_iad:val('ab_iad')};
+    const r=await fetch('/add_bien',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
+    showResult('Añadir bien',await r.json());closeModal('addModal');loadBiens();
+  }catch(e){showResult('Añadir bien',{status:'error',message:String(e)});}
+  sp.style.display='none';
+}
+async function loadConfig(){
+  try{const r=await (await fetch('/update_config')).json();
+    document.getElementById('cfg_broker_name').value=r.broker_name||'';
+    document.getElementById('cfg_broker_phone').value=r.broker_phone||'';
+  }catch(e){}
+}
+async function saveConfig(){
+  const sp=document.getElementById('spin');sp.style.display='block';
+  try{const r=await fetch('/update_config',{method:'POST',headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({broker_name:val('cfg_broker_name'),broker_phone:val('cfg_broker_phone')})});
+    showResult('Configuración',await r.json());
+  }catch(e){showResult('Configuración',{status:'error',message:String(e)});}
   sp.style.display='none';
 }
 async function submitCloseBien(){
@@ -700,6 +839,7 @@ async function submitCloseBien(){
   sp.style.display='none';
 }
 refreshStatus();
+loadConfig();
 setInterval(refreshStatus,10000);
 </script></body></html>"""
 

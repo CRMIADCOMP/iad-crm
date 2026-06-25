@@ -114,6 +114,47 @@ def save_incoming_message(phone, body, raw=None, received_at=None):
         return cur.lastrowid
 
 
+def get_broker():
+    """Devuelve (nombre, teléfono) del bróker, con override de la base de datos.
+
+    Lee los valores guardados desde el dashboard; si no hay, usa los valores
+    por defecto de config (BROKER_NAME / BROKER_PHONE).
+    """
+    import config
+    name = get_state("broker_name") or config.BROKER_NAME
+    phone = get_state("broker_phone") or config.BROKER_PHONE
+    return name, phone
+
+
+def set_broker(name=None, phone=None):
+    """Guarda el nombre y/o el teléfono del bróker (override del dashboard)."""
+    if name:
+        set_state("broker_name", name)
+    if phone:
+        set_state("broker_phone", phone)
+
+
+def get_custom_cities():
+    """Devuelve el dict de ciudades añadidas desde el dashboard (abreviatura->nombre)."""
+    raw = get_state("custom_cities")
+    return json.loads(raw) if raw else {}
+
+
+def add_custom_city(abbrev, full):
+    """Añade (o actualiza) una ciudad personalizada en la base de datos."""
+    cities = get_custom_cities()
+    cities[abbrev.strip().lower()] = full.strip()
+    set_state("custom_cities", json.dumps(cities, ensure_ascii=False))
+
+
+def get_city_names():
+    """Devuelve el mapeo de ciudades fusionando config.CITY_NAMES + ciudades personalizadas."""
+    import config
+    merged = dict(config.CITY_NAMES)
+    merged.update(get_custom_cities())
+    return merged
+
+
 def get_unprocessed_messages():
     """Devuelve todos los mensajes que el pipeline aun no ha procesado.
 

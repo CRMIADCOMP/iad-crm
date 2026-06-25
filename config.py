@@ -17,6 +17,7 @@ variables de entorno y se decodifican en tiempo de ejecución:
   - Cuenta de servicio (Service Account) de Google para acceder a Sheets.
 """
 import os
+import re
 import json
 import base64
 
@@ -48,8 +49,13 @@ ANTHROPIC_MODEL = os.environ.get("ANTHROPIC_MODEL", "claude-haiku-4-5-20251001")
 
 # Zona horaria del planificador (scheduler) que dispara las ejecuciones.
 TIMEZONE = os.environ.get("TIMEZONE", "Europe/Madrid")
-# Horas de disparo de las ejecuciones (en hora de Madrid). Lista de enteros, p. ej. [8, 12, 18].
-RUN_HOURS = [int(h) for h in os.environ.get("RUN_HOURS", "8,12,18").split(",")]
+# Horas de disparo de las ejecuciones (en hora de Madrid). Lista de enteros.
+# 8/12/18 = pipeline COMPLETO ; 10/15 = solo lectura de respuestas + actualización de columnas.
+RUN_HOURS = [int(h) for h in os.environ.get("RUN_HOURS", "8,10,12,15,18").split(",")]
+# Horas con pipeline completo (lectura Gmail + primeros contactos + respuestas).
+FULL_RUN_HOURS = {int(h) for h in os.environ.get("FULL_RUN_HOURS", "8,12,18").split(",")}
+# Horas en modo "solo respuestas" (sin leer Gmail ni enviar primeros contactos).
+REPLIES_ONLY_HOURS = {int(h) for h in os.environ.get("REPLIES_ONLY_HOURS", "10,15").split(",")}
 
 # Ruta de la base de datos SQLite (almacena las respuestas de WhatsApp y el estado de las ejecuciones).
 DB_PATH = os.environ.get("DB_PATH", "crm.db")
@@ -126,34 +132,122 @@ CONFIG_COL = {
 }
 
 # ---------------------------------------------------------------------------
+# Tipos de inmueble y ciudades (parseo del nombre de la hoja)
+# ---------------------------------------------------------------------------
+# Tipos de inmueble: prefijo del nombre de la hoja -> nombre completo + artículo español.
+BIEN_TYPES = {
+    "T": {"name": "Terreno", "article": "el"},   # el terreno
+    "C": {"name": "Casa", "article": "la"},       # la casa
+    "P": {"name": "Piso", "article": "el"},       # el piso
+    "Pa": {"name": "Parking", "article": "el"},   # el parking
+    "L": {"name": "Local", "article": "el"},      # el local
+}
+
+# Abreviaturas de ciudad usadas en los nombres de hoja -> nombre completo de la ciudad.
+# Editable desde el dashboard (se añaden ciudades nuevas en la base de datos).
+CITY_NAMES = {
+    "vaca": "Vacarisses",
+    "sant vic": "Sant Vicenç dels Horts",
+    "vall": "Vallirana",
+    "esplu": "Esplugues de Llobregat",
+    "ole": "Olesa de Montserrat",
+    "figu": "Figueres",
+    "barca": "Barcelona",
+    "oli": "Olivella",
+}
+
+# Datos del bróker de financiación (recomendado a los prospectos sin financiación).
+# Editables desde el dashboard (se guardan en la base de datos como override).
+BROKER_NAME = os.environ.get("BROKER_NAME", "Thom")
+BROKER_PHONE = os.environ.get("BROKER_PHONE", "+34651386644")
+
+
+def parse_bien_info(sheet_name, city_names=None):
+    """Extrae el tipo, la ciudad, el precio y el artículo de un nombre de hoja.
+
+    El nombre de hoja sigue el formato: ``[TIPO] [ABREV_CIUDAD] [PRECIO]``
+    (ej. "T Vaca 55k", "C sant vic 340k", "Pa Esplu 12 500").
+
+    Parámetros:
+        sheet_name (str): nombre de la hoja del inmueble.
+        city_names (dict | None): mapeo abreviatura->ciudad; si es None usa CITY_NAMES.
+
+    Devuelve:
+        dict con las claves: "type" (nombre completo), "type_code" (T/C/P/Pa/L),
+        "city" (nombre completo o la abreviatura si no se conoce), "price" (texto)
+        y "article" (el/la). Los campos desconocidos quedan como "".
+    """
+    city_names = city_names or CITY_NAMES
+    res = {"type": "", "type_code": "", "city": "", "price": "", "article": ""}
+    tokens = (sheet_name or "").split()
+    if not tokens:
+        return res
+    # El primer token es el código de tipo si coincide con BIEN_TYPES.
+    code = tokens[0]
+    info = BIEN_TYPES.get(code)
+    if info:
+        res["type_code"] = code
+        res["type"] = info["name"]
+        res["article"] = info["article"]
+        rest = tokens[1:]
+    else:
+        rest = tokens
+    # El precio son los tokens finales que parecen un precio (cifras, opcional "k").
+    price_tokens = []
+    while rest and re.match(r"^\d+k?$", rest[-1], re.I):
+        price_tokens.insert(0, rest.pop())
+    res["price"] = " ".join(price_tokens)
+    # Lo que queda en medio es la abreviatura de ciudad.
+    abbrev = " ".join(rest).strip()
+    res["city"] = city_names.get(abbrev.lower(), abbrev)
+    return res
+
+
+# ---------------------------------------------------------------------------
 # Reglas de negocio
 # ---------------------------------------------------------------------------
 # Los datos de prospectos empiezan SIEMPRE en la fila 4.
 # Las filas 1, 2 y 3 (títulos/encabezados existentes) NUNCA deben modificarse.
 DATA_START_ROW = 4
 
-# Estados que permiten el envío del PRIMER mensaje al prospecto.
-SENDABLE_STATES = {"", "Nuevo contacto", "WhatsApp enviado"}
-# Estado en caso de fallo al enviar el WhatsApp (se reintenta en la siguiente ejecución).
-# Color recomendado en la lista desplegable del Sheets: rojo claro #FF6B6B.
-ERROR_WA_STATE = "Error envío WA"
+# --- Estados del flujo conversacional en 3 pasos ---
+STATE_NEW = "Nuevo contacto"
+STATE_PASO1 = "WhatsApp enviado - Paso 1"   # primer contacto enviado
+STATE_PASO2 = "WhatsApp enviado - Paso 2"   # el prospecto confirmó interés -> preguntas
+STATE_COMPLETED = "Perfil completado"        # perfil cualificado (financiación tratada)
+STATE_OUT = "Fuera"                          # respuesta negativa / no interesado
+ERROR_WA_STATE = "Error envío WA"            # fallo de envío (se reintenta), color #FF6B6B
+
+# Estados que permiten el envío del PRIMER mensaje (Paso 1).
+# "WhatsApp enviado" (legacy) se mantiene por compatibilidad con filas antiguas.
+SENDABLE_STATES = {"", STATE_NEW}
 # Estados introducidos manualmente: NUNCA deben sobrescribirse de forma automática.
-MANUAL_STATES = {"Visita apuntada", "Visita hecha", "Fuera"}
-# Estados desde los cuales se permite el cierre automático a los 7 días.
-AUTO_CLOSE_FROM = {"", "Nuevo contacto", "WhatsApp enviado", "No responde"}
+MANUAL_STATES = {"Visita apuntada", "Visita hecha", STATE_OUT}
+# Estados desde los cuales se permite el cierre automático a los 7 días (Paso 1 sin respuesta).
+AUTO_CLOSE_FROM = {STATE_PASO1, "WhatsApp enviado", "No responde"}
 
 # Valores de la lista desplegable de la columna L (Estado final).
 # Se aplican automáticamente a todas las hojas mediante /setup_dropdowns.
 ESTADO_FINAL_OPTIONS = [
-    "Nuevo contacto",
-    "WhatsApp enviado",
-    ERROR_WA_STATE,            # "Error envío WA"
+    STATE_NEW,
+    STATE_PASO1,
+    STATE_PASO2,
+    STATE_COMPLETED,
+    ERROR_WA_STATE,
     "No responde",
     "Sin respuesta - 7d",
     "Visita apuntada",
     "Visita hecha",
-    "Fuera",
+    STATE_OUT,
 ]
+# Colores (RGB 0-1) de la mise en forme conditionnelle por estado para /setup_dropdowns.
+# (texto blanco indicado cuando el fondo es oscuro).
+ESTADO_COLORS = {
+    STATE_PASO1: {"bg": (0.741, 0.843, 0.933)},                     # #BDD7EE azul claro
+    STATE_PASO2: {"bg": (0.0, 0.694, 0.922), "white": True},        # #00b1eb azul medio
+    STATE_COMPLETED: {"bg": (0.216, 0.337, 0.137), "white": True},  # #375623 verde oscuro
+    ERROR_WA_STATE: {"bg": (1.0, 0.42, 0.42)},                      # #FF6B6B rojo claro
+}
 # Nombre de respaldo (fallback) que se usa cuando no se conoce el nombre del prospecto.
 FALLBACK_NAME = "vecino/a"
 # Hoja de respaldo: los leads que no se asocian (match) a la pestaña Config se escriben
