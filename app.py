@@ -568,12 +568,24 @@ border-radius:8px;font-weight:bold;font-size:15px;margin:6px;}
 text-decoration:none;padding:11px 18px;border-radius:8px;font-weight:bold;font-size:14px;margin:6px;}
 .muted{color:#999;font-size:13px;}
 .modal{display:none;position:fixed;inset:0;background:rgba(0,0,0,.5);z-index:50;}
-.modal.show{display:flex;align-items:center;justify-content:center;}
-.modalbox{background:#fff;border-radius:12px;padding:22px;width:360px;max-width:92%;}
-.modalbox h3{margin:0 0 14px;color:var(--dark);border:none;padding:0;}
+.modal.show{display:flex;align-items:center;justify-content:center;padding:16px;box-sizing:border-box;}
+/* La modale ne dépasse jamais 90vh ; son contenu défile en interne */
+.modalbox{background:#fff;border-radius:12px;width:360px;max-width:92%;max-height:90vh;
+  display:flex;flex-direction:column;overflow:hidden;}
+.modalbox h3{margin:0;padding:18px 22px 12px;color:var(--dark);border:none;}
+/* Zone scrollable du formulaire */
+.modalbody{padding:0 22px;overflow-y:auto;flex:1 1 auto;-webkit-overflow-scrolling:touch;}
 .modalbox label{font-size:12px;color:#666;display:block;margin:6px 0 2px;}
 .modalbox input,.modalbox select{width:100%;box-sizing:border-box;padding:10px;margin-bottom:6px;border:1px solid #ddd;border-radius:6px;font-size:14px;}
-.modalbtns{display:flex;gap:10px;margin-top:12px;}.modalbtns .btn{flex:1;padding:11px;}
+/* Boutons collés en bas, toujours visibles */
+.modalbtns{display:flex;gap:10px;padding:14px 22px;border-top:1px solid #eee;background:#fff;
+  position:sticky;bottom:0;flex:0 0 auto;}
+.modalbtns .btn{flex:1;padding:12px;}
+/* Sur mobile : modale plein écran */
+@media(max-width:560px){
+  .modal.show{padding:0;}
+  .modalbox{width:100%;max-width:100%;max-height:100vh;height:100vh;border-radius:0;}
+}
 </style></head><body><div class="wrap">
 
 <div class="header">
@@ -665,6 +677,7 @@ text-decoration:none;padding:11px 18px;border-radius:8px;font-weight:bold;font-s
 <!-- Modal Ajouter un bien (formulario completo con generación en tiempo real) -->
 <div id="addModal" class="modal"><div class="modalbox">
   <h3>➕ Añadir un nuevo inmueble</h3>
+  <div class="modalbody">
   <label>Tipo *</label>
   <select id="ab_type" onchange="updatePreview()">
     <option value="T">T — Terreno</option>
@@ -690,6 +703,7 @@ text-decoration:none;padding:11px 18px;border-radius:8px;font-weight:bold;font-s
     <div>Título: <b id="pv_title">—</b></div>
     <div id="pv_err" style="color:#DC3545;margin-top:4px;"></div>
   </div>
+  </div>
   <div class="modalbtns">
     <button class="btn gray" onclick="closeModal('addModal')">Cancelar</button>
     <button class="btn" id="ab_submit" onclick="submitAddBien()">Añadir</button>
@@ -699,7 +713,9 @@ text-decoration:none;padding:11px 18px;border-radius:8px;font-weight:bold;font-s
 <!-- Modal Marcar como vendido -->
 <div id="closeModal" class="modal"><div class="modalbox">
   <h3>🏁 Marcar inmueble como vendido</h3>
+  <div class="modalbody">
   <label>Inmueble activo</label><select id="cb_nom"><option>Cargando…</option></select>
+  </div>
   <div class="modalbtns">
     <button class="btn gray" onclick="closeModal('closeModal')">Cancelar</button>
     <button class="btn orange" onclick="submitCloseBien()">Marcar vendido</button>
