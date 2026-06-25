@@ -1,83 +1,105 @@
 """
-Configuration centrale du CRM IAD.
-Toutes les valeurs sensibles sont lues depuis les variables d'environnement Railway.
-Les credentials Google (Gmail OAuth + Service Account Sheets) sont passés en base64.
+Configuración central del CRM IAD.
+
+Este archivo concentra toda la configuración del CRM inmobiliario "iad-crm"
+desplegado en Railway. Su función es reunir en un solo lugar los parámetros
+del sistema (IDs de hojas, direcciones de correo, tokens de API, reglas de
+negocio, mapeo de columnas de las hojas de cálculo, etc.).
+
+Casi todos los valores sensibles se leen desde las variables de entorno de
+Railway mediante ``os.environ.get(...)``, con un valor por defecto de respaldo
+para el entorno local. Esto permite cambiar la configuración en producción sin
+modificar el código.
+
+Las credenciales de Google se transmiten en formato base64 a través de
+variables de entorno y se decodifican en tiempo de ejecución:
+  - Gmail OAuth (credentials.json + token.json) para leer el buzón de correo.
+  - Cuenta de servicio (Service Account) de Google para acceder a Sheets.
 """
 import os
 import json
 import base64
 
 # ---------------------------------------------------------------------------
-# Paramètres fixes du projet
+# Parámetros fijos del proyecto
 # ---------------------------------------------------------------------------
+# ID del Google Sheet principal donde viven todas las hojas de prospectos.
 GOOGLE_SHEET_ID = os.environ.get("GOOGLE_SHEET_ID", "1WYvelN50Hz_8gCo8o9BtsFpUUdLaxQbzlXAySSY4I9M")
+# Nombre de la pestaña "Config" dentro del Google Sheet (mapeo de URLs/refs por portal).
 CONFIG_SHEET_NAME = os.environ.get("CONFIG_SHEET_NAME", "🔗 Config")
 
-# Gmail à lire
+# Dirección de Gmail que se va a leer (buzón del que se extraen los leads).
 GMAIL_ADDRESS = os.environ.get("GMAIL_ADDRESS", "thibaut.montalat@iadespana.es")
-# Email destinataire du rapport
+# Dirección de correo destinataria del informe (reporte) generado por el CRM.
 REPORT_EMAIL = os.environ.get("REPORT_EMAIL", "thibaut.montalat@iadespana.es")
 
-# UltraMsg (WhatsApp)
+# UltraMsg (WhatsApp): identificador de la instancia de UltraMsg usada para enviar WhatsApp.
 ULTRAMSG_INSTANCE = os.environ.get("ULTRAMSG_INSTANCE", "instance181932")
+# Token de autenticación de la API de UltraMsg.
 ULTRAMSG_TOKEN = os.environ.get("ULTRAMSG_TOKEN", "00sfoebzfiih9jfa")
+# URL base de la API de UltraMsg, construida a partir del identificador de instancia.
 ULTRAMSG_BASE_URL = f"https://api.ultramsg.com/{ULTRAMSG_INSTANCE}"
 
-# Anthropic (Claude Haiku pour l'analyse des réponses)
+# Anthropic (Claude Haiku para analizar las respuestas de los prospectos).
+# Clave de la API de Anthropic (vacía por defecto: debe definirse en Railway).
 ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY", "")
+# Modelo de Anthropic empleado para el análisis de las respuestas.
 ANTHROPIC_MODEL = os.environ.get("ANTHROPIC_MODEL", "claude-haiku-4-5-20251001")
 
-# Fuseau horaire du scheduler
+# Zona horaria del planificador (scheduler) que dispara las ejecuciones.
 TIMEZONE = os.environ.get("TIMEZONE", "Europe/Madrid")
-# Heures de déclenchement (heure Madrid)
+# Horas de disparo de las ejecuciones (en hora de Madrid). Lista de enteros, p. ej. [8, 12, 18].
 RUN_HOURS = [int(h) for h in os.environ.get("RUN_HOURS", "8,12,18").split(",")]
 
-# Base de données SQLite (réponses WhatsApp + état des runs)
+# Ruta de la base de datos SQLite (almacena las respuestas de WhatsApp y el estado de las ejecuciones).
 DB_PATH = os.environ.get("DB_PATH", "crm.db")
 
-# Délai (secondes) entre deux écritures Sheets pour éviter le quota 429
+# Retardo (en segundos) entre dos escrituras consecutivas en Sheets para evitar el límite de cuota 429.
 SHEETS_WRITE_DELAY = float(os.environ.get("SHEETS_WRITE_DELAY", "1"))
 
-# Sources de leads à détecter
+# Fuentes (portales) de leads que el sistema debe detectar.
 LEAD_SOURCES = ["Idealista", "Fotocasa", "Habitaclia"]
 
-# Mapping adresse d'expéditeur -> source (détection par défaut).
-# Sert aussi à construire le filtre "from:" de la requête Gmail.
-# Note : Fotocasa ET Habitaclia arrivent depuis "cliente@fotocasa.pro" ;
-# la distinction se fait sur la fin du sujet ("- De Fotocasa" / "- De habitaclia").
+# Mapeo dirección del remitente -> fuente (detección por defecto).
+# También se utiliza para construir el filtro "from:" de la consulta a Gmail.
+# Nota: Fotocasa Y Habitaclia llegan desde "cliente@fotocasa.pro";
+# la distinción se hace según el final del asunto ("- De Fotocasa" / "- De habitaclia").
 PORTAL_SENDERS = {
     "reply@idealista.com": "Idealista",
-    "cliente@fotocasa.pro": "Fotocasa",  # Fotocasa + Habitaclia (même expéditeur)
+    "cliente@fotocasa.pro": "Fotocasa",  # Fotocasa + Habitaclia (mismo remitente)
 }
 
-# Expéditeurs dont les mails sont mis automatiquement à la corbeille (nettoyage).
-# Nécessite le scope Gmail "modify" (régénérer token.json via setup_auth.py).
+# Remitentes cuyos correos se envían automáticamente a la papelera (limpieza del buzón).
+# Requiere el scope de Gmail "modify" (regenerar token.json mediante setup_auth.py).
 GMAIL_AUTO_DELETE = [
     "idealista@mailing.idealista.com",
     "conseiller@lr.caisse-epargne.fr",
     "no-reply@accounts.google.com",
     "reminders@facebookmail.com",
 ]
-# Fenêtre de recherche pour la suppression automatique
+# Ventana de búsqueda para la eliminación automática (p. ej. "30d" = últimos 30 días).
 GMAIL_DELETE_WINDOW = os.environ.get("GMAIL_DELETE_WINDOW", "30d")
 
 # ---------------------------------------------------------------------------
-# Colonnes des feuilles "prospects" (index 1 = colonne A)
+# Columnas de las hojas de "prospectos" (índice 1 = columna A)
 # ---------------------------------------------------------------------------
+# Diccionario que asocia cada campo del prospecto con su número de columna en la hoja.
+# El índice empieza en 1 (estilo gspread: 1 = columna A, 2 = columna B, ...).
 COL = {
-    "nombre": 1,        # A
-    "telefono": 2,      # B
-    "email": 3,         # C
-    "fuente": 4,        # D
-    "notas": 5,         # E
-    "presupuesto": 6,   # F
-    "tiempo_busqueda": 7,  # G
-    "pago_validado": 8,    # H
-    "fecha_contacto": 9,   # I
-    "ultimo_mensaje": 10,  # J
-    "relance_j2": 11,      # K
-    "estado_final": 12,    # L
+    "nombre": 1,        # A - Nombre del prospecto
+    "telefono": 2,      # B - Teléfono
+    "email": 3,         # C - Correo electrónico
+    "fuente": 4,        # D - Fuente/portal de origen
+    "notas": 5,         # E - Notas
+    "presupuesto": 6,   # F - Presupuesto
+    "tiempo_busqueda": 7,  # G - Tiempo de búsqueda
+    "pago_validado": 8,    # H - Pago validado
+    "fecha_contacto": 9,   # I - Fecha de contacto
+    "ultimo_mensaje": 10,  # J - Último mensaje
+    "relance_j2": 11,      # K - Reactivación J+2 (seguimiento al 2º día)
+    "estado_final": 12,    # L - Estado final
 }
+# Encabezados (cabeceras) de las columnas de las hojas de prospectos, en orden.
 PROSPECT_HEADERS = [
     "Nombre", "Teléfono", "Email", "Fuente", "Notas",
     "Presupuesto", "Tiempo búsqueda", "Pago validado",
@@ -85,40 +107,43 @@ PROSPECT_HEADERS = [
 ]
 
 # ---------------------------------------------------------------------------
-# Colonnes de l'onglet "🔗 Config" (index 0 = colonne A)
+# Columnas de la pestaña "🔗 Config" (índice 0 = columna A)
 # ---------------------------------------------------------------------------
+# Diccionario que asocia cada campo de la pestaña Config con su índice de columna.
+# Aquí el índice empieza en 0 (estilo lista: 0 = columna A, 1 = columna B, ...).
+# Esta pestaña relaciona cada hoja/zona con sus URLs y referencias por portal.
 CONFIG_COL = {
-    "feuille": 0,        # A
-    "description": 1,    # B
-    "url_idealista": 2,  # C
-    "ref_idealista": 3,  # D
-    "url_fotocasa": 4,   # E
-    "ref_fotocasa": 5,   # F
-    "url_habitaclia": 6, # G
-    "ref_habitaclia": 7, # H
-    "url_iad": 8,        # I
-    "ref_iad": 9,        # J
+    "feuille": 0,        # A - Hoja/zona (nombre de la pestaña de prospectos)
+    "description": 1,    # B - Descripción
+    "url_idealista": 2,  # C - URL del anuncio en Idealista
+    "ref_idealista": 3,  # D - Referencia del anuncio en Idealista
+    "url_fotocasa": 4,   # E - URL del anuncio en Fotocasa
+    "ref_fotocasa": 5,   # F - Referencia del anuncio en Fotocasa
+    "url_habitaclia": 6, # G - URL del anuncio en Habitaclia
+    "ref_habitaclia": 7, # H - Referencia del anuncio en Habitaclia
+    "url_iad": 8,        # I - URL del anuncio en IAD
+    "ref_iad": 9,        # J - Referencia del anuncio en IAD
 }
 
 # ---------------------------------------------------------------------------
-# Règles métier
+# Reglas de negocio
 # ---------------------------------------------------------------------------
-# Les données prospects commencent TOUJOURS à la ligne 4.
-# Les lignes 1, 2, 3 (titres/en-têtes existants) ne doivent JAMAIS être touchées.
+# Los datos de prospectos empiezan SIEMPRE en la fila 4.
+# Las filas 1, 2 y 3 (títulos/encabezados existentes) NUNCA deben modificarse.
 DATA_START_ROW = 4
 
-# États autorisant l'envoi du PREMIER message
+# Estados que permiten el envío del PRIMER mensaje al prospecto.
 SENDABLE_STATES = {"", "Nuevo contacto", "WhatsApp enviado"}
-# Statut en cas d'échec d'envoi WhatsApp (retenté au run suivant).
-# Couleur recommandée dans la liste déroulante du Sheets : rouge clair #FF6B6B
+# Estado en caso de fallo al enviar el WhatsApp (se reintenta en la siguiente ejecución).
+# Color recomendado en la lista desplegable del Sheets: rojo claro #FF6B6B.
 ERROR_WA_STATE = "Error envío WA"
-# États saisis manuellement : ne JAMAIS les écraser
+# Estados introducidos manualmente: NUNCA deben sobrescribirse de forma automática.
 MANUAL_STATES = {"Visita apuntada", "Visita hecha", "Fuera"}
-# États depuis lesquels la clôture automatique 7j est autorisée
+# Estados desde los cuales se permite el cierre automático a los 7 días.
 AUTO_CLOSE_FROM = {"", "Nuevo contacto", "WhatsApp enviado", "No responde"}
 
-# Valeurs de la liste déroulante de la colonne L (Estado final).
-# Appliquées automatiquement à toutes les feuilles via /setup_dropdowns.
+# Valores de la lista desplegable de la columna L (Estado final).
+# Se aplican automáticamente a todas las hojas mediante /setup_dropdowns.
 ESTADO_FINAL_OPTIONS = [
     "Nuevo contacto",
     "WhatsApp enviado",
@@ -129,22 +154,38 @@ ESTADO_FINAL_OPTIONS = [
     "Visita hecha",
     "Fuera",
 ]
+# Nombre de respaldo (fallback) que se usa cuando no se conoce el nombre del prospecto.
 FALLBACK_NAME = "vecino/a"
-# Feuille de repli : les leads non matchés à l'onglet Config y sont écrits
-# (au lieu d'être perdus). Aucun WhatsApp n'est envoyé pour ces leads.
+# Hoja de respaldo: los leads que no se asocian (match) a la pestaña Config se escriben
+# aquí (en lugar de perderse). No se envía ningún WhatsApp para estos leads.
 FALLBACK_SHEET = os.environ.get("FALLBACK_SHEET", "Leads sin clasificar")
-# Envoyer un WhatsApp même sans annonce matchée ? (déconseillé : message sans URL)
+# ¿Enviar un WhatsApp aunque no haya anuncio asociado? (desaconsejado: mensaje sin URL).
 SEND_WHATSAPP_WHEN_UNMATCHED = os.environ.get("SEND_WHATSAPP_WHEN_UNMATCHED", "0") == "1"
-RELANCE_DELAY_DAYS = 2          # relance J+2
-NO_REPLY_CLOSE_DAYS = 7         # passage en "Sin respuesta - 7d"
-LONG_SEARCH_THRESHOLD_MONTHS = 12  # > 1 an => message spécial
+# Número de días tras los cuales se realiza la reactivación/seguimiento (relance J+2).
+RELANCE_DELAY_DAYS = 2          # reactivación al 2º día (J+2)
+# Número de días sin respuesta tras los cuales el prospecto pasa a "Sin respuesta - 7d".
+NO_REPLY_CLOSE_DAYS = 7         # paso a "Sin respuesta - 7d"
+# Umbral (en meses) a partir del cual se considera una búsqueda larga (> 1 año => mensaje especial).
+LONG_SEARCH_THRESHOLD_MONTHS = 12  # > 1 año => mensaje especial
 
 
 # ---------------------------------------------------------------------------
-# Décodage des credentials base64 (Railway -> fichiers locaux éphémères)
+# Decodificación de credenciales en base64 (Railway -> archivos locales efímeros)
 # ---------------------------------------------------------------------------
 def _b64_to_file(env_var, path):
-    """Décode une variable d'env base64 vers un fichier, si présente."""
+    """Decodifica una variable de entorno en base64 y la escribe en un archivo.
+
+    Lee el valor base64 de la variable de entorno indicada, lo decodifica a
+    bytes y lo guarda en la ruta dada. Si la variable no existe o está vacía,
+    no hace nada.
+
+    Parámetros:
+        env_var (str): Nombre de la variable de entorno con el contenido base64.
+        path (str): Ruta del archivo de destino donde escribir los bytes decodificados.
+
+    Devuelve:
+        bool: True si la variable existía y se escribió el archivo; False en caso contrario.
+    """
     raw = os.environ.get(env_var)
     if not raw:
         return False
@@ -154,7 +195,18 @@ def _b64_to_file(env_var, path):
 
 
 def _b64_to_dict(env_var):
-    """Décode une variable d'env base64 vers un dict JSON, ou None."""
+    """Decodifica una variable de entorno en base64 hacia un diccionario JSON.
+
+    Lee el valor base64 de la variable de entorno, lo decodifica a texto UTF-8
+    y lo interpreta como JSON.
+
+    Parámetros:
+        env_var (str): Nombre de la variable de entorno con el JSON en base64.
+
+    Devuelve:
+        dict | None: El diccionario resultante del JSON, o None si la variable
+        no existe o está vacía.
+    """
     raw = os.environ.get(env_var)
     if not raw:
         return None
@@ -162,7 +214,15 @@ def _b64_to_dict(env_var):
 
 
 def gmail_credentials_path():
-    """Écrit credentials.json depuis GMAIL_CREDENTIALS et renvoie le chemin."""
+    """Garantiza la existencia de credentials.json y devuelve su ruta.
+
+    Si el archivo credentials.json no existe localmente, lo genera decodificando
+    la variable de entorno GMAIL_CREDENTIALS (base64). Estas son las credenciales
+    OAuth de cliente de Gmail.
+
+    Devuelve:
+        str: La ruta del archivo credentials.json.
+    """
     path = "credentials.json"
     if not os.path.exists(path):
         _b64_to_file("GMAIL_CREDENTIALS", path)
@@ -170,7 +230,15 @@ def gmail_credentials_path():
 
 
 def gmail_token_path():
-    """Écrit token.json depuis GMAIL_TOKEN et renvoie le chemin."""
+    """Garantiza la existencia de token.json y devuelve su ruta.
+
+    Si el archivo token.json no existe localmente, lo genera decodificando la
+    variable de entorno GMAIL_TOKEN (base64). Este token OAuth permite acceder
+    al buzón de Gmail sin reautenticarse.
+
+    Devuelve:
+        str: La ruta del archivo token.json.
+    """
     path = "token.json"
     if not os.path.exists(path):
         _b64_to_file("GMAIL_TOKEN", path)
@@ -178,7 +246,16 @@ def gmail_token_path():
 
 
 def google_service_account_info():
-    """Renvoie le dict du compte de service Google (Sheets) depuis GOOGLE_SERVICE_ACCOUNT."""
+    """Devuelve la información de la cuenta de servicio de Google (Sheets).
+
+    Intenta primero decodificar la cuenta de servicio desde la variable de
+    entorno GOOGLE_SERVICE_ACCOUNT (JSON en base64). Si no está disponible,
+    recurre al archivo local service_account.json si existe.
+
+    Devuelve:
+        dict | None: El diccionario con las credenciales de la cuenta de
+        servicio, o None si no se encuentra en ninguna fuente.
+    """
     info = _b64_to_dict("GOOGLE_SERVICE_ACCOUNT")
     if info is None and os.path.exists("service_account.json"):
         with open("service_account.json", "r", encoding="utf-8") as f:

@@ -1,171 +1,173 @@
-# IAD CRM — Automatisation leads immobiliers (Railway)
+# CRM IAD COMP — El Francés Inmobiliaria
 
-App Flask 24h/24 qui, à **8h / 12h / 18h (heure Madrid)** :
-lit les emails Gmail → détecte les leads Idealista/Fotocasa/Habitaclia → matche avec l'onglet
-`🔗 Config` du Google Sheets → déduplique → ajoute/met à jour le prospect → envoie un WhatsApp
-personnalisé via UltraMsg → traite les réponses reçues (analyse Claude Haiku → colonnes F/G/H) →
-relance J+2 → clôture après 7 jours → envoie un rapport par email.
+Sistema automático de gestión de leads inmobiliarios (Idealista / Fotocasa / Habitaclia),
+desplegado en **Railway**. Una app Flask funciona 24/7 y, a las **8h, 12h y 18h (hora de Madrid)**,
+ejecuta un pipeline que:
 
-Un webhook (`/webhook`) reçoit les réponses WhatsApp d'UltraMsg et les stocke dans SQLite.
+1. Lee los correos nuevos de Gmail (bandeja de entrada, últimas 24h).
+2. Detecta los leads de Idealista, Fotocasa y Habitaclia y extrae nombre, teléfono, email y referencia.
+3. Hace el *matching* con la pestaña `🔗 Config` del Google Sheets (por URL o referencia del anuncio).
+4. Deduplica (por teléfono Y email) e inserta/actualiza el prospecto en la hoja correcta.
+5. Envía un mensaje de WhatsApp individual y personalizado vía UltraMsg.
+6. Procesa las respuestas de WhatsApp recibidas (webhook → SQLite), las analiza con Claude Haiku
+   y rellena las columnas F/G/H (presupuesto, tiempo de búsqueda, financiación).
+7. Gestiona los seguimientos J+2, cierra los no-respondedores a los 7 días y envía un informe por email.
 
-## Fichiers
-
-| Fichier | Rôle |
-|---|---|
-| `app.py` | Flask + APScheduler (8h/12h/18h) + routes `/health`, `/run` |
-| `pipeline.py` | Orchestration des 14 étapes |
-| `gmail_reader.py` | Lecture des emails + extraction leads + envoi du rapport |
-| `sheets_handler.py` | Google Sheets (matching, dédup, insert/update, F/G/H) |
-| `whatsapp.py` | Envoi UltraMsg + templates de messages (ES) |
-| `ai_analyzer.py` | Analyse des réponses via Claude Haiku |
-| `webhook.py` | Réception des réponses WhatsApp |
-| `database.py` | SQLite (réponses entrantes + état des runs) |
-| `config.py` | Configuration (variables d'env) |
-| `setup_auth.py` | **À lancer une fois en local** pour générer `token.json` |
-| `requirements.txt`, `Procfile`, `runtime.txt`, `.gitignore` | Déploiement |
+Incluye además un **dashboard web** protegido por contraseña para controlar todo manualmente.
 
 ---
 
-## Étape 1 — Authentification Gmail (en local, une seule fois)
+## Descripción de cada archivo
 
-1. Place ton `credentials.json` (OAuth client *Desktop* Gmail) dans ce dossier.
-2. Installe les dépendances et lance le script :
+| Archivo | Rol en el sistema |
+|---|---|
+| `app.py` | App Flask principal. Scheduler APScheduler (8h/12h/18h), webhook UltraMsg, dashboard `/dashboard` + login, y todos los endpoints de acción (`/run`, `/full_scan`, `/reset_timestamp`, `/diag`, `/status`, `/send_report`, `/test_email`, `/setup_dropdowns`, `/add_bien`, `/close_bien`, `/list_biens`, `/health`). |
+| `pipeline.py` | Orquestación del pipeline (las 14 etapas) y construcción del informe por email (HTML + texto). |
+| `gmail_reader.py` | Lectura de correos, extracción de leads (parsers Idealista y Fotocasa/Habitaclia), borrado automático de correos no deseados y envío de emails. |
+| `sheets_handler.py` | Acceso a Google Sheets (cuenta de servicio): matching, deduplicación, inserción/actualización, gestión de inmuebles (añadir/cerrar) y configuración de las listas desplegables. |
+| `whatsapp.py` | Plantillas de mensajes (español) y envío individual vía UltraMsg; limpieza del nombre y normalización del número. |
+| `ai_analyzer.py` | Análisis de las respuestas de WhatsApp con Claude Haiku → presupuesto, tiempo de búsqueda, pago validado. |
+| `webhook.py` | Webhook que recibe las respuestas de WhatsApp de UltraMsg y las guarda en SQLite. |
+| `database.py` | Base SQLite: mensajes entrantes de WhatsApp y estado de los runs (timestamps). |
+| `config.py` | Configuración central: variables de entorno, columnas, reglas de negocio y estados. |
+| `report_assets.py` | Logo IAD (URL) y enlace del Google Sheets para el informe. |
+| `setup_auth.py` | **Se ejecuta una sola vez en local** para generar `token.json` (OAuth Gmail). |
+| `requirements.txt` | Dependencias Python. |
+| `Procfile` | Comando de arranque en Railway: `gunicorn app:app --workers 1 --threads 4 --timeout 120`. |
+| `runtime.txt` | Versión de Python (3.11). |
+| `.gitignore` | Excluye los secretos (`credentials.json`, `token.json`, `service_account.json`, `*.db`, `.env`). |
+
+---
+
+## Instalación y despliegue (guía para agentes IAD España)
+
+### 1. Autenticación de Gmail (en local, una sola vez)
+
+1. Coloca tu `credentials.json` (cliente OAuth de tipo *Escritorio*) en la carpeta del proyecto.
+2. Instala las dependencias y ejecuta el script:
    ```bash
    pip install -r requirements.txt
    python setup_auth.py
    ```
-3. Connecte-toi avec **thibaut.montalat@iadespana.es** dans le navigateur.
-4. `token.json` est créé. Le script affiche aussi les valeurs **base64** de
-   `credentials.json` et `token.json` à coller dans Railway (`GMAIL_CREDENTIALS`, `GMAIL_TOKEN`).
+3. Conéctate con **thibaut.montalat@iadespana.es** en el navegador y acepta los permisos.
+   El scope incluye `gmail.modify` (leer + mover a la papelera) y `gmail.send` (enviar el informe).
+4. Se crea `token.json` y el script muestra los valores **base64** de `GMAIL_CREDENTIALS` y `GMAIL_TOKEN`
+   para pegarlos en Railway.
 
-> Pour ré-afficher les base64 plus tard :
-> `base64 -i credentials.json` et `base64 -i token.json` (macOS/Linux).
+> ⚠️ Si cambias los scopes, hay que **regenerar `token.json`** (borrar el antiguo y volver a ejecutar
+> `setup_auth.py`), porque un token viejo no tendrá permiso de envío/papelera.
 
-## Étape 2 — Compte de service Google (accès au Sheets)
+### 2. Cuenta de servicio de Google (acceso a Sheets)
 
-1. Sur [console.cloud.google.com](https://console.cloud.google.com) → crée (ou réutilise) un projet.
-2. Active l'API **Google Sheets** et **Google Drive**.
-3. Crée un **compte de service** → génère une clé **JSON**.
-4. Ouvre ton Google Sheets → **Partager** → ajoute l'email du compte de service
-   (`...@...iam.gserviceaccount.com`) en **Éditeur**.
-5. Encode le JSON en base64 pour Railway :
-   ```bash
-   base64 -i service_account.json
-   ```
-   → à coller dans la variable `GOOGLE_SERVICE_ACCOUNT`.
+1. En [console.cloud.google.com](https://console.cloud.google.com), activa las APIs **Google Sheets** y **Google Drive**.
+2. Crea una **cuenta de servicio** y genera una clave **JSON**.
+3. Comparte el Google Sheets (como **Editor**) con el email de la cuenta de servicio (`...@...iam.gserviceaccount.com`).
+4. Codifica el JSON en base64 (`base64 -i service_account.json`) y pégalo en la variable `GOOGLE_SERVICE_ACCOUNT`.
 
-## Étape 3 — Pousser sur GitHub (CRMIADCOMP/iad-crm)
+### 3. Subir a GitHub y desplegar en Railway
 
-Depuis ce dossier :
 ```bash
 git init
 git add .
-git commit -m "CRM IAD initial"
+git commit -m "CRM IAD"
 git branch -M main
 git remote add origin https://github.com/CRMIADCOMP/iad-crm.git
 git push -u origin main
 ```
-> `.gitignore` exclut déjà `credentials.json`, `token.json`, `service_account.json`, `*.db`, `.env`.
-> Ces secrets ne partent **pas** sur GitHub : ils vont dans les variables Railway (étape 4).
 
-## Étape 4 — Déployer sur Railway
+En Railway: **New Project → Deploy from GitHub repo**, luego añade las variables de entorno y genera el dominio
+(Settings → Networking → Generate Domain).
 
-1. [railway.app](https://railway.app) → **New Project** → **Deploy from GitHub repo** → `CRMIADCOMP/iad-crm`.
-2. Railway détecte Python, installe `requirements.txt` et lance le `Procfile` (`web: gunicorn app:app`).
-3. Onglet **Variables** → ajoute les variables ci-dessous.
-4. Onglet **Settings** → **Networking** → **Generate Domain** pour obtenir l'URL publique
-   (ex. `https://iad-crm.up.railway.app`).
+> **IMPORTANTE — una sola instancia + base persistente:** asegúrate de que el servicio se ejecuta con
+> **1 réplica** (Settings → Replicas = 1) para evitar planificadores duplicados (mensajes de WhatsApp dobles)
+> y estados incoherentes. Añade un **Volumen** montado en `/data` y la variable `DB_PATH=/data/crm.db` para que
+> la base SQLite sobreviva a los redespliegues.
 
-### Variables d'environnement Railway
+### Variables de entorno de Railway
 
-| Variable | Valeur |
+| Variable | Valor |
 |---|---|
-| `GMAIL_CREDENTIALS` | base64 de `credentials.json` (affiché par `setup_auth.py`) |
-| `GMAIL_TOKEN` | base64 de `token.json` (affiché par `setup_auth.py`) |
-| `GOOGLE_SERVICE_ACCOUNT` | base64 du JSON du compte de service |
-| `ANTHROPIC_API_KEY` | ta clé API Anthropic (`sk-ant-...`) |
-| `GOOGLE_SHEET_ID` | `1WYvelN50Hz_8gCo8o9BtsFpUUdLaxQbzlXAySSY4I9M` |
-| `ULTRAMSG_INSTANCE` | `instance181932` |
-| `ULTRAMSG_TOKEN` | `00sfoebzfiih9jfa` |
-| `GMAIL_ADDRESS` | `thibaut.montalat@iadespana.es` |
-| `REPORT_EMAIL` | `thibaut.montalat@iadespana.es` |
-| `TIMEZONE` | `Europe/Madrid` *(optionnel, déjà par défaut)* |
-| `RUN_HOURS` | `8,12,18` *(optionnel, déjà par défaut)* |
-| `RUN_TOKEN` | un mot de passe au choix pour sécuriser `/run` *(optionnel)* |
+| `GMAIL_CREDENTIALS` | base64 de `credentials.json` |
+| `GMAIL_TOKEN` | base64 de `token.json` (con scope modify+send) |
+| `GOOGLE_SERVICE_ACCOUNT` | base64 del JSON de la cuenta de servicio |
+| `ANTHROPIC_API_KEY` | clave API de Anthropic (`sk-ant-...`) |
+| `DASHBOARD_PASSWORD` | contraseña del dashboard |
+| `SECRET_KEY` | cadena aleatoria (sesiones estables entre despliegues) |
+| `DB_PATH` | `/data/crm.db` (con volumen) |
+| `GOOGLE_SHEET_ID` | `1WYvelN50Hz_8gCo8o9BtsFpUUdLaxQbzlXAySSY4I9M` *(por defecto)* |
+| `ULTRAMSG_INSTANCE` | `instance181932` *(por defecto)* |
+| `ULTRAMSG_TOKEN` | token UltraMsg *(por defecto)* |
+| `RUN_TOKEN` | *(opcional)* protege los endpoints por token |
 
-> Variables optionnelles déjà fournies par défaut dans `config.py` : tu peux les omettre
-> sauf si tu veux changer une valeur. Les 4 premières + `ANTHROPIC_API_KEY` sont **obligatoires**.
+### 4. Webhook de UltraMsg
 
-## Étape 5 — Configurer le webhook UltraMsg
-
-UltraMsg dashboard → **Settings → Webhook** :
-- **Webhook URL** : `https://<ton-domaine-railway>/webhook`
-  (ex. `https://iad-crm.up.railway.app/webhook`)
-- Active **« On Message Received »** (messages entrants).
-- Enregistre.
-
-Teste : envoie un WhatsApp au numéro de l'instance → un log `[webhook] réponse reçue...`
-apparaît dans les logs Railway et le message est stocké en base.
+En el panel de UltraMsg → **Settings → Webhook** → Webhook URL = `https://<tu-dominio>/webhook`,
+y activa «On Message Received».
 
 ---
 
-## Vérifier / tester
+## Endpoints
 
-- `GET https://<domaine>/health` → statut + dernier run.
-- `GET https://<domaine>/run?token=<RUN_TOKEN>` → déclenche le pipeline manuellement
-  (sans `RUN_TOKEN` défini, `GET /run` suffit).
-- Les runs automatiques tournent à 8h, 12h, 18h (Madrid).
-
-## Notes importantes
-
-- **Un message par prospect**, sur son numéro perso. Jamais de groupe.
-- Envoi bloqué si `Estado final` ∉ {vide, `Nuevo contacto`, `WhatsApp enviado`}.
-- Nom vide → `vecino/a`.
-- Déduplication par **téléphone ET email** avant toute insertion.
-- Le **message du prospect** est stocké en colonne **E (Notas)** ; l'URL des relances est relue
-  depuis l'onglet Config (colonne I de la feuille correspondante).
-- L'extraction des leads (`gmail_reader.py`) repose sur des regex génériques : si le format
-  exact des emails Idealista/Fotocasa/Habitaclia diffère, ajuste les motifs `RE_*` en haut du fichier.
-- SQLite (`crm.db`) est local au conteneur Railway. Le redéploiement le réinitialise ; pour
-  une persistance durable, ajoute un **Volume** Railway monté sur le dossier et pointe
-  `DB_PATH` dessus (ex. `/data/crm.db`).
+- `GET /` — ping del servicio.
+- `GET /health` — estado, próximo run y último run.
+- `GET /dashboard` — panel de control (requiere login).
+- `GET /login` — inicio de sesión.
+- `POST /run` (`?dry_run=true`) — ejecuta el pipeline ahora.
+- `GET /full_scan` (`?dry_run=true`) — escaneo único de 30 días, luego vuelve a 24h.
+- `POST /reset_timestamp` — pone `last_run_ts` a 0 (reprocesa 3 días en el siguiente run).
+- `GET /status` — resumen del último run.
+- `GET /diag` — diagnóstico (variables, Gmail, Sheets).
+- `POST /send_report` — envía por email el informe del último run.
+- `POST /setup_dropdowns` — aplica la lista desplegable «Estado final» y el color en todas las hojas.
+- `POST /add_bien`, `POST /close_bien`, `GET /list_biens` — gestión de inmuebles.
 
 ---
 
-## Débogage : « aucune ligne ne s'ajoute »
+## Estructura del Google Sheets
 
-Ouvre ces URLs dans ton navigateur (remplace `<domaine>` par ton domaine Railway) :
+**Hojas de prospectos** (los datos empiezan SIEMPRE en la fila 4; las filas 1-3 son títulos y no se tocan):
 
-1. **`https://<domaine>/diag`** — vérifie tout :
-   - `env` : les variables d'env présentes (true/false).
-   - `gmail` : la requête utilisée, le **nombre de mails trouvés** (`matched_messages`) et un échantillon (expéditeur + sujet).
-   - `sheets` : titre du classeur, liste des onglets, nombre de lignes du Config, échantillon de refs, et test d'écriture (`fallback_sheet_ok`).
-2. **`https://<domaine>/run`** — déclenche le pipeline maintenant (ne pas attendre 8h/12h/18h).
-3. **`https://<domaine>/status`** (~30 s après) — résumé du dernier run (leads détectés, écrits, non matchés, erreurs).
+| Col | Campo | Relleno |
+|---|---|---|
+| A | Nombre | automático (del correo) |
+| B | Teléfono | automático, normalizado |
+| C | Email | automático |
+| D | Fuente | portal de origen |
+| E | Notas | **siempre vacío** (manual) |
+| F | Presupuesto | IA, solo si la celda está vacía |
+| G | Tiempo búsqueda | IA, solo si la celda está vacía |
+| H | Pago validado | IA: `Sí - Validado` / `En curso` / `No - Rechazado` / `Pendiente` |
+| I | Fecha contacto | fecha del primer contacto (no se modifica luego) |
+| J | Último mensaje | fecha de cada envío de WhatsApp |
+| K | Relance J+2 | `Pendiente` → `Enviada` → `No necesaria` |
+| L | Estado final | ver lógica de estados |
 
-Lecture des résultats `/diag` :
+**Pestaña `🔗 Config`** (mapea cada anuncio a una hoja): A=Hoja, B=Descripción, C/D=URL/Ref Idealista,
+E/F=URL/Ref Fotocasa, G/H=URL/Ref Habitaclia, I/J=URL/Ref IAD.
 
-- `gmail.matched_messages = 0` → la requête ne trouve rien : mauvais expéditeur dans
-  `PORTAL_SENDERS`, aucun mail dans les dernières 24 h, ou label INBOX vide.
-- `gmail.error_auth` → `GMAIL_TOKEN` / `GMAIL_CREDENTIALS` manquants ou token périmé
-  (régénère `token.json` avec `setup_auth.py` : le scope d'envoi a été ajouté).
-- `sheets.error_spreadsheet` → le compte de service n'a pas accès : partage le Sheet en
-  **Éditeur** avec l'email du service account, ou `GOOGLE_SERVICE_ACCOUNT` est absent/mal encodé.
-- `sheets.error_write` → API Sheets/Drive non activée, ou partage manquant.
+### Lógica de estados (columna L)
 
-### Feuille de repli (changement important)
+Transiciones automáticas: `""` → `Nuevo contacto` → `WhatsApp enviado` → `No responde` → `Sin respuesta - 7d`.
+- `Error envío WA`: cuando falla el envío; se reintenta en el siguiente run (color rojo claro #FF6B6B).
+- Estados manuales (NUNCA se sobrescriben): `Visita apuntada`, `Visita hecha`, `Fuera`.
 
-Les leads qui **ne matchent pas** l'onglet Config ne sont plus perdus : ils sont écrits dans
-la feuille **`Leads sin clasificar`** avec l'état `Sin clasificar` (aucun WhatsApp envoyé,
-car le message a besoin de l'URL de l'annonce). C'est souvent la cause du « zéro ligne » :
-les mails Idealista n'ont ni URL ni référence dans le corps, donc le matching échouait et le
-lead était ignoré. Désormais tu verras au minimum les leads arriver dans cette feuille — preuve
-que Gmail + écriture Sheets fonctionnent — puis tu pourras corriger les refs du Config.
+La selección de URL del anuncio sigue la prioridad: **C (Idealista) → E (Fotocasa) → G (Habitaclia) → I (IAD)**;
+si no hay ninguna URL válida, no se envía el WhatsApp y se añade una alerta `[ALERTA]` al informe.
 
-Pour forcer l'envoi WhatsApp même sans match : variable Railway `SEND_WHATSAPP_WHEN_UNMATCHED=1`
-(déconseillé, le message contiendra une URL vide).
+---
 
-### Endpoints disponibles
+## Gestión de inmuebles (desde el dashboard)
 
-`/` état, `/health` statut + dernier run, `/status` résumé détaillé, `/diag` diagnostic complet,
-`/run` déclenchement manuel, `/webhook` réception WhatsApp.
+- **➕ Añadir un inmueble**: crea la fila en `Config` y duplica la hoja plantilla `T Ole 155k`,
+  la renombra, vacía los datos (filas 4+) y pone la descripción en la fila 2. Las referencias se
+  extraen automáticamente de las URLs.
+- **🏁 Marcar como vendido**: renombra la hoja y la fila de Config con el prefijo `VEND ` y vacía las URLs.
+
+---
+
+## Notas
+
+- Un mensaje por prospecto, a su número personal. Nunca mensajes grupales.
+- El script **nunca crea ni borra hojas** automáticamente (salvo duplicar la plantilla al añadir un inmueble).
+  Si una hoja del Config no existe, se genera una alerta en el informe.
+- La base SQLite (`crm.db`) es efímera salvo que se use un Volumen de Railway con `DB_PATH`.

@@ -1,9 +1,22 @@
 """
-Accès au Google Sheets via un compte de service (gspread).
-- Lecture de l'onglet "🔗 Config" pour le matching annonce -> feuille.
-- Déduplication / insertion / mise à jour des prospects.
-- Mise à jour des colonnes F/G/H d'après l'analyse IA.
-- Gestion des états (relances, clôtures).
+Acceso a Google Sheets mediante una cuenta de servicio (gspread).
+
+Este modulo concentra toda la interaccion con la hoja de calculo del CRM:
+
+- Lectura de la pestana "🔗 Config" para el matching anuncio -> hoja (feuille):
+  a partir de la URL o de la referencia de un anuncio se localiza la hoja de
+  prospectos del bien correspondiente.
+- Deduplicacion / insercion / actualizacion de prospectos: se evita duplicar
+  un mismo contacto (por telefono o email) y se completan solo los campos
+  vacios al actualizar.
+- Actualizacion de las columnas F/G/H segun el analisis de la IA (presupuesto,
+  tiempo de busqueda, validacion de pago, etc.).
+- Gestion de los estados de cada prospecto (relances/seguimientos, cierres),
+  incluida la lista desplegable de "Estado final" y su formato condicional.
+
+Toda la lectura se apoya en una cache en memoria (se reinicia en cada
+ejecucion del pipeline) para minimizar las llamadas a la API de Google y
+respetar la cuota de peticiones.
 """
 import re
 import time
@@ -20,18 +33,31 @@ SCOPES = [
     "https://www.googleapis.com/auth/drive",
 ]
 
+# Cliente gspread autenticado y objeto de la hoja de calculo (se crean una sola
+# vez de forma perezosa y se reutilizan en toda la ejecucion).
 _client = None
 _spreadsheet = None
 
-# --- Cache mémoire (réinitialisé à chaque run) pour limiter les appels API ----
-_ws_objs = {}        # titre -> objet worksheet
-_ws_list = None      # liste des worksheets (1 seul appel/run)
-_values_cache = {}   # titre -> get_all_values()
-_config_rows = None  # lignes de l'onglet Config
+# --- Cache en memoria (reiniciada en cada ejecucion) para limitar las llamadas
+# --- a la API y no agotar la cuota de Google Sheets. ---
+# Cada estructura cachea un nivel distinto de acceso a la hoja:
+_ws_objs = {}        # titulo de hoja -> objeto worksheet (evita re-buscarla)
+_ws_list = None      # lista de todas las worksheets (una sola llamada por ejecucion)
+_values_cache = {}   # titulo de hoja -> get_all_values() (valores leidos una vez)
+_config_rows = None  # filas ya normalizadas de la pestana Config
 
 
 def reset_cache():
-    """À appeler au début de chaque run du pipeline."""
+    """
+    Vacia por completo la cache en memoria.
+
+    Debe llamarse al principio de cada ejecucion del pipeline (y tras cambios
+    estructurales como add_bien/close_bien) para que la siguiente lectura
+    vuelva a consultar Google Sheets en lugar de servir datos obsoletos.
+
+    No recibe parametros ni devuelve valor; actua sobre las variables globales
+    de cache (_ws_objs, _ws_list, _values_cache, _config_rows).
+    """
     global _ws_list, _config_rows
     _ws_objs.clear()
     _values_cache.clear()
@@ -40,6 +66,14 @@ def reset_cache():
 
 
 def _all_worksheets():
+    """
+    Devuelve la lista de todas las worksheets de la hoja de calculo.
+
+    Usa la cache _ws_list: la primera vez consulta la API (worksheets()) y en
+    las siguientes llamadas de la misma ejecucion reutiliza el resultado.
+
+    Devuelve: lista de objetos worksheet de gspread.
+    """
     global _ws_list
     if _ws_list is None:
         _ws_list = _get_spreadsheet().worksheets()
@@ -47,12 +81,31 @@ def _all_worksheets():
 
 
 def _write_throttle():
-    """Pause entre deux écritures pour éviter le quota 429."""
+    """
+    Introduce una pausa entre dos escrituras consecutivas.
+
+    Sirve para no superar la cuota de la API de Google Sheets y evitar el
+    error 429 (demasiadas peticiones). La duracion la define
+    config.SHEETS_WRITE_DELAY.
+
+    No recibe parametros ni devuelve valor.
+    """
     time.sleep(config.SHEETS_WRITE_DELAY)
 
 
 def _values_for(ws):
-    """get_all_values() mis en cache par feuille."""
+    """
+    Devuelve todos los valores de una worksheet, cacheados por hoja.
+
+    La primera vez llama a get_all_values() y guarda el resultado en
+    _values_cache indexado por el titulo de la hoja; las siguientes lecturas
+    de esa misma hoja se sirven desde la cache.
+
+    Parametros:
+        ws: objeto worksheet de gspread.
+
+    Devuelve: lista de filas (cada fila es una lista de cadenas).
+    """
     name = ws.title
     if name not in _values_cache:
         _values_cache[name] = ws.get_all_values()
@@ -60,6 +113,17 @@ def _values_for(ws):
 
 
 def _get_spreadsheet():
+    """
+    Devuelve el objeto Spreadsheet, autenticando si hace falta.
+
+    De forma perezosa crea el cliente gspread a partir de la cuenta de servicio
+    de Google (config.google_service_account_info()) y abre la hoja de calculo
+    indicada por config.GOOGLE_SHEET_ID. El cliente y la hoja se cachean en
+    _client/_spreadsheet para reutilizarlos.
+
+    Devuelve: el objeto Spreadsheet de gspread.
+    Lanza RuntimeError si no hay credenciales de cuenta de servicio.
+    """
     global _client, _spreadsheet
     if _spreadsheet is not None:
         return _spreadsheet
@@ -68,6 +132,8 @@ def _get_spreadsheet():
         raise RuntimeError(
             "Compte de service Google introuvable (GOOGLE_SERVICE_ACCOUNT manquant)."
         )
+    # Construye las credenciales OAuth2 a partir del JSON de la cuenta de
+    # servicio, autoriza el cliente gspread y abre la hoja por su ID.
     creds = Credentials.from_service_account_info(info, scopes=SCOPES)
     _client = gspread.authorize(creds)
     _spreadsheet = _client.open_by_key(config.GOOGLE_SHEET_ID)
@@ -75,16 +141,26 @@ def _get_spreadsheet():
 
 
 # ---------------------------------------------------------------------------
-# Onglet Config : matching annonce -> feuille
+# Pestana Config: matching anuncio -> hoja (feuille)
 # ---------------------------------------------------------------------------
 def _get_config_worksheet():
     """
-    Renvoie l'onglet Config. Tolérant au nom exact (emoji/espaces) :
-    essaie le nom configuré, sinon le premier onglet contenant 'config'.
+    Devuelve la pestana Config.
+
+    Es tolerante con el nombre exacto de la pestana (que suele llevar emoji y
+    espacios, p. ej. "🔗 Config"): primero busca una coincidencia exacta con
+    config.CONFIG_SHEET_NAME y, si no la encuentra, acepta la primera pestana
+    cuyo titulo contenga "config" (sin distinguir mayusculas).
+
+    Devuelve: el objeto worksheet de la pestana Config.
+    Lanza gspread.WorksheetNotFound si no existe ninguna pestana Config.
     """
+    # 1) Coincidencia exacta con el nombre configurado.
     for ws in _all_worksheets():
         if ws.title == config.CONFIG_SHEET_NAME:
             return ws
+    # 2) Tolerancia: cualquier pestana que contenga "config" (ignora emoji,
+    #    espacios o diferencias de mayusculas en el titulo).
     for ws in _all_worksheets():
         if "config" in ws.title.lower():
             print(f"[config] onglet Config trouvé par tolérance: '{ws.title}'")
@@ -94,33 +170,60 @@ def _get_config_worksheet():
 
 def load_config_rows():
     """
-    Renvoie les lignes de l'onglet Config (sans l'en-tête), mises en cache.
-    Toutes les cellules sont forcées en chaîne (str) : les refs stockées comme
-    nombres entiers (ex. 926287) doivent comparer comme "926287".
+    Devuelve las filas de la pestana Config (sin la fila de cabecera), cacheadas.
+
+    Todas las celdas se fuerzan a cadena (str) porque algunas referencias se
+    almacenan como numeros enteros (p. ej. 926287) y deben poder compararse
+    como texto ("926287"). El resultado se guarda en _config_rows para no
+    releer la pestana en la misma ejecucion.
+
+    Devuelve: lista de filas (cada fila es una lista de cadenas).
     """
     global _config_rows
     if _config_rows is None:
         ws = _get_config_worksheet()
         rows = _values_for(ws)
+        # rows[0] es la cabecera; los datos reales empiezan en rows[1:].
         data = rows[1:] if rows else []
         _config_rows = [[str(c) for c in row] for row in data]
     return _config_rows
 
 
 def _ref_norm(value):
+    """
+    Normaliza una referencia de anuncio para poder compararla de forma robusta.
+
+    Convierte el valor a cadena, lo pasa a minusculas y conserva solo los
+    caracteres alfanumericos (descarta espacios, guiones, puntos, etc.). Asi
+    "Ref-92.62/87 " y "REF926287" se reducen a la misma forma normalizada.
+
+    Parametros:
+        value: referencia en cualquier formato (str o numero).
+
+    Devuelve: la referencia normalizada (cadena alfanumerica en minusculas).
+    """
     return "".join(ch for ch in str(value).lower() if ch.isalnum())
 
 
 def _pick_url(row):
     """
-    Sélectionne UNE URL pour le bien, par ordre de priorité :
+    Selecciona UNA URL para el bien, por orden de prioridad.
+
+    Prioridad de las columnas del Config:
     C (Idealista) -> E (Fotocasa) -> G (Habitaclia) -> I (IAD).
-    Une cellule est "vide" si None, "" ou ne commence pas par http.
-    Renvoie "" si aucune URL valide.
+    Una celda se considera "vacia" si es None, "" o no empieza por "http".
+    Se devuelve la primera URL valida segun ese orden.
+
+    Parametros:
+        row: fila de la pestana Config (lista de cadenas).
+
+    Devuelve: la URL elegida, o "" si ninguna celda contiene una URL valida.
     """
     cc = config.CONFIG_COL
+    # Acceso seguro a la celda por indice (devuelve "" si la fila es mas corta).
     def cell(idx):
         return row[idx] if idx < len(row) else ""
+    # Recorre las columnas de URL en el orden de prioridad C->E->G->I.
     for key in ("url_idealista", "url_fotocasa", "url_habitaclia", "url_iad"):
         v = (cell(cc[key]) or "").strip()
         if v.lower().startswith("http"):
@@ -128,11 +231,23 @@ def _pick_url(row):
     return ""
 
 
+# Bandera para registrar las refs del Config una sola vez por ejecucion.
 _config_logged = False
 
 
 def _log_config_refs(rows):
-    """Affiche une fois toutes les refs/URLs de l'onglet Config (debug matching)."""
+    """
+    Imprime una sola vez todas las refs/URLs de la pestana Config.
+
+    Es una ayuda de depuracion del matching: muestra, por cada hoja con datos,
+    las referencias de cada portal y su forma normalizada (_ref_norm). Solo se
+    ejecuta la primera vez gracias a la bandera _config_logged.
+
+    Parametros:
+        rows: filas del Config (lista de filas).
+
+    No devuelve valor (solo imprime).
+    """
     global _config_logged
     if _config_logged:
         return
@@ -158,9 +273,19 @@ def _log_config_refs(rows):
 
 def match_lead_to_sheet(lead):
     """
-    Cherche dans l'onglet Config la feuille correspondant au lead,
-    via l'URL ou la référence de l'annonce.
-    Renvoie (feuille, iad_url) ou (None, None).
+    Busca en la pestana Config la hoja (feuille) correspondiente a un lead.
+
+    El emparejamiento se intenta de dos formas, por cada fila del Config:
+      1) Por URL: si la URL del lead y alguna URL del Config coinciden como
+         subcadena en cualquiera de los dos sentidos (una contenida en la otra).
+      2) Por referencia: si la ref del lead, una vez normalizada (_ref_norm),
+         es igual a alguna ref normalizada de la fila.
+
+    Parametros:
+        lead: dict del lead, con claves como "url", "ref", "fuente".
+
+    Devuelve: la tupla (feuille, iad_url) de la hoja que coincide, o
+    (None, None) si no se encuentra ninguna.
     """
     cc = config.CONFIG_COL
     lead_url = (lead.get("url") or "").lower()
@@ -184,7 +309,9 @@ def match_lead_to_sheet(lead):
         refs = [cell(cc["ref_idealista"]), cell(cc["ref_fotocasa"]),
                 cell(cc["ref_habitaclia"]), cell(cc["ref_iad"])]
 
-        # match par URL (substring dans un sens ou l'autre)
+        # Matching por URL: coincidencia como subcadena en ambos sentidos
+        # (la URL del Config dentro de la del lead o viceversa), util cuando
+        # una de las dos lleva parametros extra de seguimiento.
         if lead_url:
             for u in urls:
                 u = u.strip().lower()
@@ -192,7 +319,8 @@ def match_lead_to_sheet(lead):
                     print(f"[match]   ✅ match URL -> feuille='{feuille}'")
                     return feuille, _pick_url(row)
 
-        # match par référence
+        # Matching por referencia: comparacion de refs ya normalizadas
+        # (alfanumerico en minusculas) para tolerar formatos distintos.
         if lead_ref:
             for r in refs:
                 if r and _ref_norm(r) == lead_ref:
@@ -204,10 +332,21 @@ def match_lead_to_sheet(lead):
 
 
 # ---------------------------------------------------------------------------
-# Feuilles prospects
+# Hojas de prospectos
 # ---------------------------------------------------------------------------
 def get_iad_url_for_sheet(feuille):
-    """Renvoie l'URL du bien (priorité C->E->G->I) pour une feuille, pour les relances."""
+    """
+    Devuelve la URL del bien asociada a una hoja, para usarla en los relances.
+
+    Busca en el Config la fila cuya columna "feuille" coincide con el nombre de
+    hoja indicado (comparando en minusculas y sin espacios) y aplica _pick_url
+    para escoger la URL por prioridad C->E->G->I.
+
+    Parametros:
+        feuille: nombre de la hoja de prospectos.
+
+    Devuelve: la URL del bien, o "" si la hoja no aparece en el Config.
+    """
     cc = config.CONFIG_COL
     target = (feuille or "").strip().lower()
     for row in load_config_rows():
@@ -219,8 +358,17 @@ def get_iad_url_for_sheet(feuille):
 
 def _get_worksheet(name):
     """
-    Renvoie la feuille dont le titre correspond (strip().lower() des deux côtés).
-    NE crée JAMAIS de feuille. Renvoie None si introuvable.
+    Devuelve la worksheet cuyo titulo coincide con el nombre dado.
+
+    La comparacion es tolerante: se aplica strip().lower() a ambos lados. El
+    resultado se cachea en _ws_objs por nombre. IMPORTANTE: nunca crea una
+    hoja nueva; si no la encuentra, registra las hojas existentes y devuelve
+    None.
+
+    Parametros:
+        name: nombre (titulo) de la hoja buscada.
+
+    Devuelve: el objeto worksheet, o None si no existe.
     """
     if name in _ws_objs:
         return _ws_objs[name]
@@ -236,19 +384,39 @@ def _get_worksheet(name):
 
 
 def worksheet_exists(name):
+    """
+    Indica si existe una hoja con el nombre dado.
+
+    Parametros:
+        name: nombre (titulo) de la hoja.
+
+    Devuelve: True si _get_worksheet la encuentra, False en caso contrario.
+    """
     return _get_worksheet(name) is not None
 
 
 def find_prospect(ws, phone="", email=""):
     """
-    Déduplication par téléphone ET email.
-    Renvoie (row_index, row_values) si trouvé, sinon (None, None).
-    row_index est 1-based (en comptant l'en-tête).
+    Busca un prospecto existente en una hoja por telefono O por email.
+
+    Deduplicacion: recorre las filas de datos y devuelve la primera fila cuyo
+    telefono normalizado coincida con el del lead, o cuyo email (en minusculas)
+    coincida. Asi se evita crear duplicados de un mismo contacto.
+
+    Parametros:
+        ws: objeto worksheet de la hoja de prospectos.
+        phone: telefono del lead (se normaliza con normalize_phone).
+        email: email del lead.
+
+    Devuelve: (row_index, row_values) si lo encuentra, o (None, None). El
+    row_index es 1-based (contando la cabecera), apto para la API de Sheets.
     """
     phone_n = normalize_phone(phone)
     email_n = (email or "").strip().lower()
     values = _values_for(ws)
-    start = config.DATA_START_ROW  # données à partir de la ligne 4 (lignes 1-3 réservées)
+    # Los datos empiezan en la fila 4 (config.DATA_START_ROW); las filas 1-3
+    # estan reservadas para cabeceras y no se tocan.
+    start = config.DATA_START_ROW
     for i, row in enumerate(values[start - 1:], start=start):
         r_phone = normalize_phone(row[config.COL["telefono"] - 1] if len(row) >= config.COL["telefono"] else "")
         r_email = (row[config.COL["email"] - 1] if len(row) >= config.COL["email"] else "").strip().lower()
@@ -261,8 +429,22 @@ def find_prospect(ws, phone="", email=""):
 
 def upsert_prospect(feuille, lead):
     """
-    Insère ou met à jour un prospect dans la feuille `feuille`.
-    Renvoie (row_index, is_new, row_values).
+    Inserta o actualiza un prospecto en la hoja `feuille` (logica de upsert).
+
+    Comportamiento:
+      - Si el prospecto no existe (find_prospect no lo encuentra), inserta una
+        fila nueva en la primera fila libre (nunca antes de la fila 4) con los
+        datos basicos y el estado inicial "Nuevo contacto". La columna Notas
+        se deja vacia.
+      - Si ya existe, solo completa los campos que esten vacios (nombre, email,
+        telefono); nunca sobrescribe datos existentes y nunca toca Notas.
+
+    Parametros:
+        feuille: nombre de la hoja de prospectos destino.
+        lead: dict del lead con nombre/telefono/email/fuente.
+
+    Devuelve: (row_index, is_new, row_values). Si la hoja no existe,
+    (None, False, None).
     """
     ws = _get_worksheet(feuille)
     if ws is None:
@@ -270,38 +452,41 @@ def upsert_prospect(feuille, lead):
     row_idx, existing = find_prospect(ws, lead.get("telefono", ""), lead.get("email", ""))
     today = datetime.date.today().isoformat()
 
-    # Nettoyage : aucune donnée copiée avec des espaces superflus
+    # Limpieza: ningun dato se copia con espacios sobrantes.
     nombre = (lead.get("nombre") or "").strip()
     telefono = (lead.get("telefono", "") or "").strip()
     email = (lead.get("email", "") or "").strip()
     fuente = (lead.get("fuente", "") or "").strip()
-    # Colonne E (Notas) laissée VIDE : le prospect la remplira manuellement.
+    # La columna E (Notas) se deja VACIA: el prospecto la rellenara a mano.
 
     if row_idx is None:
+        # --- Insercion de un prospecto nuevo ---
         new_row = [""] * len(config.PROSPECT_HEADERS)
         new_row[config.COL["nombre"] - 1] = nombre
         new_row[config.COL["telefono"] - 1] = telefono
         new_row[config.COL["email"] - 1] = email
         new_row[config.COL["fuente"] - 1] = fuente
-        new_row[config.COL["fecha_contacto"] - 1] = today  # col I : date 1ère détection
+        new_row[config.COL["fecha_contacto"] - 1] = today  # col I: fecha de 1a deteccion
         new_row[config.COL["estado_final"] - 1] = "Nuevo contacto"
         vals = _values_for(ws)
-        # Écrit à la 1ère ligne libre, jamais avant la ligne 4 (lignes 1-3 réservées)
+        # Escribe en la primera fila libre, nunca antes de la fila 4
+        # (las filas 1-3 estan reservadas para cabeceras).
         new_index = max(len(vals) + 1, config.DATA_START_ROW)
         _write_throttle()
         ws.update(range_name=f"A{new_index}", values=[new_row],
                   value_input_option="USER_ENTERED")
-        # garde le cache synchronisé
+        # Mantiene la cache sincronizada con lo que acabamos de escribir.
         while len(vals) < new_index:
             vals.append([])
         vals[new_index - 1] = new_row
         return new_index, True, new_row
 
-    # mise à jour : complète les champs manquants seulement (jamais Notas)
+    # --- Actualizacion: solo completa los campos vacios (nunca Notas) ---
     def _existing(col_name):
         idx = config.COL[col_name] - 1
         return (existing[idx] if len(existing) > idx else "").strip()
 
+    # Solo se rellena un campo si el lead lo aporta y la celda esta vacia.
     updates = {}
     if nombre and not _existing("nombre"):
         updates["nombre"] = nombre
@@ -315,7 +500,21 @@ def upsert_prospect(feuille, lead):
 
 
 def _cache_set(name, row_idx, col_idx, val):
-    """Met à jour la valeur en cache (row_idx/col_idx 1-based)."""
+    """
+    Actualiza un valor concreto en la cache en memoria de una hoja.
+
+    Mantiene _values_cache coherente con las escrituras hechas en Google
+    Sheets, ampliando la matriz cacheada (filas/columnas) si hace falta para
+    poder fijar la celda indicada.
+
+    Parametros:
+        name: titulo de la hoja en la cache.
+        row_idx: fila 1-based.
+        col_idx: columna 1-based.
+        val: valor a guardar.
+
+    No devuelve valor (si la hoja no esta cacheada, no hace nada).
+    """
     vals = _values_cache.get(name)
     if vals is None:
         return
@@ -328,7 +527,20 @@ def _cache_set(name, row_idx, col_idx, val):
 
 
 def update_cells(feuille, row_idx, col_values):
-    """col_values : dict {nom_colonne_config.COL: valeur}."""
+    """
+    Actualiza varias celdas de una fila en una hoja de prospectos.
+
+    Por cada par (nombre de columna -> valor) escribe la celda correspondiente
+    en Google Sheets, respetando el throttle entre escrituras y manteniendo la
+    cache sincronizada con _cache_set.
+
+    Parametros:
+        feuille: nombre de la hoja.
+        row_idx: fila 1-based a actualizar.
+        col_values: dict {nombre_de_columna_de_config.COL: valor}.
+
+    No devuelve valor (si la hoja no existe, no hace nada).
+    """
     ws = _get_worksheet(feuille)
     if ws is None:
         return
@@ -340,6 +552,19 @@ def update_cells(feuille, row_idx, col_values):
 
 
 def get_cell(feuille, row_idx, col_name):
+    """
+    Lee el valor de una celda concreta de una hoja de prospectos.
+
+    Usa los valores cacheados (_values_for) y devuelve "" si la fila/columna
+    queda fuera de rango.
+
+    Parametros:
+        feuille: nombre de la hoja.
+        row_idx: fila 1-based.
+        col_name: nombre de columna definido en config.COL.
+
+    Devuelve: el contenido de la celda como cadena, o "".
+    """
     ws = _get_worksheet(feuille)
     if ws is None:
         return ""
@@ -351,7 +576,14 @@ def get_cell(feuille, row_idx, col_name):
 
 
 def list_all_prospect_sheets():
-    """Noms de toutes les feuilles de prospects (exclut tout onglet 'Config')."""
+    """
+    Devuelve los nombres de todas las hojas de prospectos.
+
+    Excluye cualquier pestana cuyo titulo sea o contenga "config" (la pestana
+    de configuracion no es una hoja de prospectos).
+
+    Devuelve: lista de nombres de hoja (cadenas).
+    """
     names = []
     for ws in _all_worksheets():
         if ws.title == config.CONFIG_SHEET_NAME or "config" in ws.title.lower():
@@ -362,33 +594,44 @@ def list_all_prospect_sheets():
 
 def setup_estado_validation():
     """
-    Applique la liste déroulante de la colonne L (Estado final) + la couleur
-    rouge clair (#FF6B6B) pour 'Error envío WA' sur TOUTES les feuilles prospects,
-    en un seul appel API. Idempotent pour la validation (remplace l'existante).
-    Renvoie la liste des feuilles traitées.
+    Configura la columna "Estado final" (col L) en todas las hojas de prospectos.
+
+    En una sola llamada batch_update aplica, por cada hoja:
+      - Una lista desplegable (validacion de datos ONE_OF_LIST) con las opciones
+        de config.ESTADO_FINAL_OPTIONS.
+      - Un formato condicional que pinta de rojo claro (#FF6B6B) las celdas
+        cuyo valor sea config.ERROR_WA_STATE ("Error envío WA").
+    Se omiten las pestanas Config y de menu. La validacion es idempotente
+    (reemplaza la existente). El rango empieza en la fila 4 (DATA_START_ROW),
+    dejando intactas las filas 1-3.
+
+    Devuelve: lista de los nombres de hoja procesados.
     """
     ss = _get_spreadsheet()
     options = config.ESTADO_FINAL_OPTIONS
-    col = config.COL["estado_final"] - 1  # col L -> index 11
+    col = config.COL["estado_final"] - 1  # col L -> indice 11 (0-based)
     requests = []
     done = []
     for ws in _all_worksheets():
         t = ws.title.strip().lower()
+        # Salta las pestanas de configuracion y de menu.
         if "config" in t or t in ("menú", "menu"):
             continue
+        # Rango de la columna L desde la fila 4 hasta el final de la hoja.
         rng = {
             "sheetId": ws.id,
-            "startRowIndex": config.DATA_START_ROW - 1,  # ligne 4 -> index 3
+            "startRowIndex": config.DATA_START_ROW - 1,  # fila 4 -> indice 3
             "endRowIndex": ws.row_count or 1000,
             "startColumnIndex": col,
             "endColumnIndex": col + 1,
         }
-        # Liste déroulante
+        # Lista desplegable (ONE_OF_LIST) con las opciones de estado.
         requests.append({"setDataValidation": {"range": rng, "rule": {
             "condition": {"type": "ONE_OF_LIST",
                           "values": [{"userEnteredValue": v} for v in options]},
             "showCustomUi": True, "strict": False}}})
-        # Couleur rouge clair #FF6B6B pour "Error envío WA"
+        # Formato condicional: rojo claro #FF6B6B para "Error envío WA"
+        # (rgb 1.0 / 0.42 / 0.42 en escala 0-1).
         requests.append({"addConditionalFormatRule": {"rule": {
             "ranges": [rng],
             "booleanRule": {
@@ -406,13 +649,27 @@ def setup_estado_validation():
 
 # ---------------------------------------------------------------------------
 # Gestion des biens (ajout / clôture)
+# Gestion de bienes (alta / cierre)
 # ---------------------------------------------------------------------------
+# Regex para extraer una secuencia de 6 o mas digitos (la referencia de un
+# anuncio dentro de su URL). Nombre y patron NO se modifican.
 _RE_URL_DIGITS = re.compile(r"(\d{6,})")
+# Titulo exacto de la hoja plantilla que se duplica al dar de alta un bien.
 BIEN_TEMPLATE = "T Ole 155k"
 
 
 def _ref_from_url(url):
-    """Extrait la référence (dernière suite de >=6 chiffres) d'une URL d'annonce."""
+    """
+    Extrae la referencia del anuncio a partir de su URL.
+
+    Toma la ultima secuencia de 6 o mas digitos que aparece en la URL
+    (_RE_URL_DIGITS), que suele ser el identificador del anuncio.
+
+    Parametros:
+        url: URL del anuncio.
+
+    Devuelve: la referencia (cadena de digitos), o "" si no hay ninguna.
+    """
     if not url:
         return ""
     found = _RE_URL_DIGITS.findall(url)
@@ -420,7 +677,14 @@ def _ref_from_url(url):
 
 
 def list_active_biens():
-    """Noms des biens actifs (col A du Config) — exclut ceux préfixés 'VEND '."""
+    """
+    Devuelve los nombres de los bienes activos.
+
+    Lee la columna A de la pestana Config y excluye los bienes ya cerrados,
+    es decir, los que llevan el prefijo "VEND " (vendidos).
+
+    Devuelve: lista de nombres de bien activos (cadenas).
+    """
     out = []
     for row in load_config_rows():
         a = (row[0] if row else "").strip()
@@ -430,7 +694,27 @@ def list_active_biens():
 
 
 def add_bien(data):
-    """Crée un nouveau bien : ligne Config + feuille (copie du template, vidée)."""
+    """
+    Da de alta un bien nuevo: crea su fila en Config y su hoja de prospectos.
+
+    Pasos:
+      1) Valida que el nombre y la descripcion no esten vacios y que el bien no
+         exista ya (ni en Config ni como hoja).
+      2) Duplica la hoja plantilla BIEN_TEMPLATE y la renombra con el nombre del
+         bien; luego la limpia (borra los datos de la fila 4 en adelante,
+         conservando las cabeceras de las filas 1-3) y escribe la descripcion
+         en A2.
+      3) Anade una fila en la pestana Config con las URLs y sus referencias
+         (extraidas con _ref_from_url).
+      4) Reinicia la cache (reset_cache) para reflejar la nueva hoja.
+
+    Parametros:
+        data: dict con "nom", "description" y las URLs por portal
+              (url_idealista, url_fotocasa, url_habitaclia, url_iad).
+
+    Devuelve: mensaje de confirmacion (cadena).
+    Lanza ValueError si faltan datos o el bien ya existe.
+    """
     nom = (data.get("nom") or "").strip()
     desc = (data.get("description") or "").strip()
     if not nom or not desc:
@@ -452,16 +736,16 @@ def add_bien(data):
     if template is None:
         raise ValueError(f"Feuille template '{BIEN_TEMPLATE}' introuvable")
 
-    # Duplique la feuille template puis la renomme
+    # Duplica la hoja plantilla y la renombra con el nombre del bien.
     new_ws = ss.duplicate_sheet(template.id, new_sheet_name=nom)
-    # Vide les données (lignes 4+), conserve en-têtes lignes 1-3
+    # Vacia los datos (fila 4 en adelante) y conserva las cabeceras (filas 1-3).
     _write_throttle()
     new_ws.batch_clear([f"A{config.DATA_START_ROW}:L{new_ws.row_count}"])
-    # Titre en ligne 2 = description
+    # En la fila 2 (A2) se escribe la descripcion como titulo del bien.
     _write_throttle()
     new_ws.update(range_name="A2", values=[[desc]], value_input_option="USER_ENTERED")
 
-    # Ligne dans l'onglet Config
+    # Fila correspondiente en la pestana Config.
     config_ws = _get_config_worksheet()
     new_row = [
         nom, desc,
@@ -477,7 +761,20 @@ def add_bien(data):
 
 
 def close_bien(nom):
-    """Clôture un bien : renomme la feuille et le Config en 'VEND ...', vide les URLs."""
+    """
+    Cierra (marca como vendido) un bien.
+
+    Renombra su hoja anteponiendo el prefijo "VEND " al titulo, hace lo mismo
+    con el nombre en la pestana Config y vacia las URLs de ese bien en el
+    Config. Reinicia la cache al terminar.
+
+    Parametros:
+        nom: nombre del bien a cerrar.
+
+    Devuelve: mensaje de confirmacion (cadena).
+    Lanza ValueError si falta el nombre, el bien ya esta cerrado o su hoja no
+    existe.
+    """
     nom = (nom or "").strip()
     if not nom:
         raise ValueError("Nom du bien requis")
@@ -487,10 +784,12 @@ def close_bien(nom):
     if ws is None:
         raise ValueError(f"Feuille '{nom}' introuvable")
 
+    # Nuevo titulo con el prefijo de bien vendido.
     new_title = "VEND " + nom
     _write_throttle()
     ws.update_title(new_title)
 
+    # Refleja el cierre en la pestana Config: renombra y vacia las URLs.
     config_ws = _get_config_worksheet()
     cc = config.CONFIG_COL
     values = config_ws.get_all_values()
@@ -499,6 +798,7 @@ def close_bien(nom):
         if (row[0] if row else "").strip().lower() == target:
             _write_throttle()
             config_ws.update_cell(i, cc["feuille"] + 1, new_title)
+            # Borra las cuatro URLs del bien (ya no esta publicado).
             for urlcol in ("url_idealista", "url_fotocasa", "url_habitaclia", "url_iad"):
                 _write_throttle()
                 config_ws.update_cell(i, cc[urlcol] + 1, "")
@@ -508,7 +808,18 @@ def close_bien(nom):
 
 
 def diag():
-    """Diagnostic : vérifie l'accès au Sheets et résume le contenu."""
+    """
+    Diagnostico: comprueba el acceso a Google Sheets y resume su contenido.
+
+    Verifica que se puede abrir la hoja de calculo, lista sus pestanas, cuenta
+    las filas del Config (con una muestra de hasta 10 filas) y comprueba la
+    presencia de la hoja de repli (FALLBACK_SHEET, que nunca se crea de forma
+    automatica). Captura cualquier excepcion y la registra en el resultado.
+
+    Devuelve: un dict con la informacion de diagnostico (titulo de la hoja,
+    pestanas, numero de filas de Config, muestra, hoja de repli y posibles
+    errores).
+    """
     out = {}
     try:
         ss = _get_spreadsheet()
@@ -534,7 +845,7 @@ def diag():
         out["config_sample"] = sample
     except Exception as e:  # noqa: BLE001
         out["error_config"] = f"{type(e).__name__}: {e}"
-    # présence de la feuille de repli (jamais créée automatiquement)
+    # Presencia de la hoja de repli (nunca se crea automaticamente).
     try:
         ws = _get_worksheet(config.FALLBACK_SHEET)
         out["fallback_sheet"] = ws.title if ws else "ABSENTE (à créer manuellement)"
@@ -544,12 +855,26 @@ def diag():
 
 
 def iter_prospects(feuille):
-    """Génère (row_idx, dict_colonnes) pour chaque prospect d'une feuille."""
+    """
+    Generador que recorre todos los prospectos de una hoja.
+
+    Por cada fila de datos (a partir de la fila 4) produce una tupla
+    (row_idx, dict_columnas) con el indice 1-based de la fila y un diccionario
+    con todas las columnas del prospecto (nombre, telefono, email, fuente,
+    notas, presupuesto, etc.).
+
+    Parametros:
+        feuille: nombre de la hoja de prospectos.
+
+    Devuelve/Genera: pares (row_idx, dict). Si la hoja no existe, no produce
+    nada (return temprano).
+    """
     ws = _get_worksheet(feuille)
     if ws is None:
         return
     values = _values_for(ws)
-    start = config.DATA_START_ROW  # lignes 1-3 réservées
+    # Los datos empiezan en la fila 4; las filas 1-3 estan reservadas.
+    start = config.DATA_START_ROW
     for i, row in enumerate(values[start - 1:], start=start):
         def g(name):
             idx = config.COL[name] - 1

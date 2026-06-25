@@ -1,17 +1,20 @@
 """
-Orchestration du pipeline CRM (exécuté à 8h, 12h, 18h heure Madrid).
+Orquestación del pipeline del CRM (se ejecuta a las 8h, 12h y 18h, hora de Madrid).
 
-Étapes :
- 1-3  Lecture Gmail + détection/extraction des leads
- 4    Matching annonce -> feuille via l'onglet Config
- 5    Déduplication (téléphone ET email)
- 6    Insertion / mise à jour du prospect
- 7    Envoi du 1er message WhatsApp personnalisé
- 8-10 Traitement des réponses reçues + analyse IA -> colonnes F/G/H
- 11   Message spécial si recherche > 1 an
- 12   Relances J+2
- 13   Clôture "Sin respuesta - 7d" après 7 jours
- 14   Rapport par email
+Este es el cerebro del sistema: encadena todas las etapas de tratamiento de leads,
+respuestas, relances (seguimientos) y cierres, y al final envía un informe por email.
+
+Etapas:
+ 1-3  Lectura de Gmail + detección/extracción de los leads
+ 4    Matching anuncio -> hoja vía la pestaña Config del Google Sheets
+ 5    Deduplicación (teléfono Y email)
+ 6    Inserción / actualización del prospecto
+ 7    Envío del primer mensaje de WhatsApp personalizado
+ 8-10 Tratamiento de las respuestas recibidas + análisis IA -> columnas F/G/H
+ 11   Mensaje especial si la búsqueda lleva > 1 año
+ 12   Relances (seguimientos) a J+2 (2 días)
+ 13   Cierre "Sin respuesta - 7d" tras 7 días sin respuesta
+ 14   Informe por email
 """
 import time
 import json
@@ -30,23 +33,30 @@ import whatsapp
 import ai_analyzer
 import report_assets
 
-# Palette IAD
-C_DARK = "#00628C"
-C_LIGHT = "#00b1eb"
-C_ORANGE = "#E87722"
-C_GRAY_BG = "#F5F5F5"
-C_GREEN = "#28A745"
-C_RED = "#DC3545"
-C_YELLOW = "#FFC107"
+# Paleta de colores corporativa IAD (usada en el informe HTML por email)
+C_DARK = "#00628C"     # azul oscuro IAD
+C_LIGHT = "#00b1eb"    # azul claro IAD
+C_ORANGE = "#E87722"   # naranja (botones / acentos)
+C_GRAY_BG = "#F5F5F5"  # fondo gris claro
+C_GREEN = "#28A745"    # verde (métricas positivas)
+C_RED = "#DC3545"      # rojo (errores / leads sin clasificar)
+C_YELLOW = "#FFC107"   # amarillo (insignia "DRY RUN")
 
 
 def _today():
+    """Devuelve la fecha de hoy (datetime.date). Atajo usado en todo el pipeline."""
     return datetime.date.today()
 
 
 def _parse_date(value):
+    """
+    Convierte un texto de fecha (de una celda del Sheets) en datetime.date.
+    Acepta varios formatos: ISO (YYYY-MM-DD), DD/MM/YYYY y DD-MM-YYYY.
+    Devuelve None si el valor está vacío o no coincide con ningún formato.
+    """
     if not value:
         return None
+    # Prueba cada formato hasta que uno funcione (recorta a los 10 primeros caracteres)
     for fmt in ("%Y-%m-%d", "%d/%m/%Y", "%d-%m-%Y"):
         try:
             return datetime.datetime.strptime(value.strip()[:10], fmt).date()
@@ -56,16 +66,32 @@ def _parse_date(value):
 
 
 def _date_to_ts(d):
+    """Convierte una fecha (date) en timestamp Unix (segundos). Sirve para comparar
+    la fecha de contacto con los timestamps de las respuestas guardadas en SQLite."""
     return time.mktime(datetime.datetime(d.year, d.month, d.day).timetuple())
 
 
+def _url_alert(nombre, phone, feuille):
+    """Construye el texto de alerta cuando falta la URL del anuncio para una hoja
+    (sin URL no se puede enviar el WhatsApp). Devuelve la cadena de alerta."""
+    return (f"[ALERTA] No se pudo enviar WhatsApp a {nombre or '?'} ({phone}) — "
+            f"URL manquante pour la feuille {feuille}. Vérifier l'onglet Config.")
+
+
 # ---------------------------------------------------------------------------
-# Index des prospects (phone -> emplacement) pour le matching des réponses
+# Índice de prospectos (teléfono -> ubicación) para emparejar las respuestas
 # ---------------------------------------------------------------------------
 def _build_prospect_index():
+    """
+    Construye un índice {telefono_normalizado: (hoja, fila, datos_prospecto)}
+    recorriendo TODAS las hojas de prospectos. Permite localizar rápidamente
+    a qué prospecto pertenece una respuesta de WhatsApp entrante.
+    Devuelve el diccionario índice.
+    """
     index = {}
     for feuille in sheets.list_all_prospect_sheets():
         for row_idx, p in sheets.iter_prospects(feuille):
+            # Normaliza el teléfono para usarlo como clave fiable (sin +, espacios, etc.)
             phone = db.normalize_phone(p.get("telefono", ""))
             if phone:
                 index[phone] = (feuille, row_idx, p)
@@ -73,21 +99,29 @@ def _build_prospect_index():
 
 
 # ---------------------------------------------------------------------------
-# Étapes 1 à 7 : nouveaux leads
+# Etapas 1 a 7: nuevos leads
 # ---------------------------------------------------------------------------
 def process_new_leads(stats):
-    # Nettoyage : suppression auto des mails indésirables (corbeille)
+    """
+    Etapas 1 a 7 del pipeline: limpia los correos no deseados, lee Gmail, detecta
+    los leads, los empareja con la hoja correspondiente (pestaña Config), deduplica,
+    inserta/actualiza el prospecto y envía el primer mensaje de WhatsApp.
+    `stats` es el diccionario de contadores/listas que se va rellenando in situ.
+    No devuelve valor (modifica `stats`).
+    """
+    # Limpieza: envía automáticamente a la papelera los correos no deseados
     try:
         deleted = gmail_reader.delete_unwanted_mails()
         stats["mails_deleted"] = len(deleted)
     except Exception as e:  # noqa: BLE001
         stats["errors"].append(f"Gmail delete: {e}")
 
-    # Full scan : 30 jours, traite tout (after_ts=0) ; sinon fenêtre normale.
+    # Full scan: ventana de 30 días, procesa TODO (after_ts=0); si no, ventana normal.
     if stats.get("full_scan"):
         last_run = 0
         fetch_kwargs = {"window": "30d"}
     else:
+        # Modo normal: solo correos posteriores al último run (evita reprocesar)
         last_run = db.get_last_run_ts()
         fetch_kwargs = {}
     try:
@@ -99,7 +133,8 @@ def process_new_leads(stats):
 
     for lead in leads:
         try:
-            # Notification de réponse Idealista : pas un nouveau lead, juste au rapport.
+            # Notificación de respuesta de Idealista: NO es un lead nuevo, solo se
+            # añade al informe (mensajería interna del portal, sin teléfono/email).
             if lead.get("kind") == "respuesta_idealista":
                 stats["idealista_responses"].append({
                     "nombre": lead.get("nombre") or "?",
@@ -107,12 +142,13 @@ def process_new_leads(stats):
                 })
                 continue
 
+            # Etapa 4: empareja el lead con una hoja según la URL/referencia del anuncio
             feuille, iad_url = sheets.match_lead_to_sheet(lead)
             matched = bool(feuille)
 
             if not matched:
-                # Lead non matché : on l'écrit quand même dans la feuille de repli
-                # pour ne rien perdre (et pouvoir diagnostiquer).
+                # Lead sin emparejar: se escribe igualmente en la hoja de repuesto
+                # (FALLBACK_SHEET) para no perder nada y poder diagnosticar.
                 stats["leads_unmatched"] += 1
                 stats["unmatched"].append({
                     "telefono": lead.get("telefono") or lead.get("email") or "?",
@@ -122,7 +158,7 @@ def process_new_leads(stats):
                 feuille = config.FALLBACK_SHEET
                 iad_url = ""
 
-            # La feuille doit exister : le script ne crée JAMAIS de feuille.
+            # La hoja DEBE existir: el script NUNCA crea hojas automáticamente.
             if not sheets.worksheet_exists(feuille):
                 stats["alerts"].append(
                     f"[ALERTA] Feuille '{feuille}' introuvable dans le Sheets — "
@@ -130,31 +166,32 @@ def process_new_leads(stats):
                 )
                 continue
 
-            # URL utilisée dans le message (annonce IAD si dispo, sinon l'URL source)
+            # URL usada en el mensaje (anuncio IAD si está disponible; si no, la URL de origen)
             msg_url = iad_url or lead.get("url", "")
             lead["url"] = msg_url
 
+            # Etapas 5 y 6: deduplica e inserta/actualiza el prospecto en la hoja
             row_idx, is_new, _ = sheets.upsert_prospect(feuille, lead)
-            if row_idx is None:  # sécurité (feuille disparue entre-temps)
+            if row_idx is None:  # seguridad (la hoja desapareció entretanto)
                 continue
             if is_new:
                 stats["prospects_new"] += 1
             else:
                 stats["prospects_updated"] += 1
 
-            # On n'envoie pas de WhatsApp pour un lead non matché (sauf override),
-            # car le message référence l'annonce et on n'a pas d'URL fiable.
+            # No se envía WhatsApp a un lead sin emparejar (salvo override por config),
+            # porque el mensaje referencia el anuncio y no hay una URL fiable.
             if not matched and not config.SEND_WHATSAPP_WHEN_UNMATCHED:
-                # marque l'état pour l'exclure des relances/clôtures automatiques
+                # marca el estado "Sin clasificar" para excluirlo de relances/cierres automáticos
                 if is_new:
                     sheets.update_cells(feuille, row_idx, {"estado_final": "Sin clasificar"})
                 continue
 
-            # Étape 7 : envoi du 1er message si l'état l'autorise
+            # Etapa 7: envío del 1er mensaje solo si el estado lo permite (SENDABLE_STATES)
             estado = sheets.get_cell(feuille, row_idx, "estado_final").strip()
             if estado not in config.SENDABLE_STATES:
                 continue
-            # déjà contacté ? (un message sortant a déjà fixé fecha_contacto + estado "WhatsApp enviado")
+            # ¿ya contactado? (un mensaje saliente ya habría fijado la columna J "último mensaje")
             already = sheets.get_cell(feuille, row_idx, "ultimo_mensaje").strip()
             if already:
                 continue
@@ -164,7 +201,7 @@ def process_new_leads(stats):
                 stats["details"].append(f"⚠️ Pas de téléphone pour {lead.get('email')} ({feuille})")
                 continue
 
-            # URL obligatoire : sans URL d'annonce on n'envoie PAS, on alerte.
+            # URL obligatoria: sin URL del anuncio NO se envía nada, se genera una alerta.
             if not msg_url:
                 stats["alerts"].append(
                     f"[ALERTA] No se pudo enviar WhatsApp a {lead.get('nombre') or '?'} "
@@ -173,41 +210,58 @@ def process_new_leads(stats):
                 )
                 continue
 
+            # En modo simulación (dry_run) NO se envía nada, solo se cuenta
             if stats.get("dry_run"):
                 print(f"[DRY RUN] whatsapp ignoré pour {phone} (primer contacto, {feuille})")
                 stats["wa_dry_skipped"] += 1
                 continue
 
+            # Construye y envía el mensaje de primer contacto vía UltraMsg
             body = whatsapp.build_first_contact(lead.get("nombre", ""), msg_url)
             ok, info = whatsapp.send_message(phone, body)
             today = _today().isoformat()
             if ok:
-                # ne touche PAS fecha_contacto (col I) : fixée à la 1ère détection
-                sheets.update_cells(feuille, row_idx, {
-                    "ultimo_mensaje": today,          # col J : maj à chaque envoi
-                    "relance_j2": "Pendiente",        # col K
-                    "estado_final": "WhatsApp enviado",  # col L
-                })
+                # Envío correcto: actualiza columnas J (último mensaje), K (relance) y L (estado)
+                upd = {
+                    "ultimo_mensaje": today,          # col J: se actualiza en cada envío
+                    "relance_j2": "Pendiente",        # col K: relance pendiente a J+2
+                    "estado_final": "WhatsApp enviado",  # col L: nuevo estado
+                }
+                # col I: se rellena solo si está vacía (fecha del primer contacto)
+                if not sheets.get_cell(feuille, row_idx, "fecha_contacto").strip():
+                    upd["fecha_contacto"] = today
+                sheets.update_cells(feuille, row_idx, upd)
                 stats["wa_first_sent"] += 1
             else:
+                # Fallo de envío -> estado "Error envío WA" (se reintentará en el próximo run)
+                sheets.update_cells(feuille, row_idx, {"estado_final": config.ERROR_WA_STATE})
                 stats["wa_failed"] += 1
                 stats["details"].append(f"❌ Envoi WA échoué {phone}: {info}")
+                print(f"[pipeline] échec envoi WA {phone} -> '{config.ERROR_WA_STATE}': {info}")
         except Exception as e:  # noqa: BLE001
             stats["errors"].append(f"Lead {lead.get('telefono')}: {e}")
 
 
 # ---------------------------------------------------------------------------
-# Étapes 8 à 11 : traitement des réponses
+# Etapas 8 a 11: tratamiento de las respuestas
 # ---------------------------------------------------------------------------
 def process_replies(stats):
+    """
+    Etapas 8 a 11: procesa las respuestas de WhatsApp recibidas (guardadas en SQLite
+    por el webhook). Las agrupa por número, las analiza con la IA (Claude Haiku),
+    rellena las columnas F/G/H del prospecto y, si lleva más de 1 año buscando, le
+    envía un mensaje especial. Modifica `stats` in situ; no devuelve valor.
+    """
+    # Recupera los mensajes aún no procesados; si no hay ninguno, termina
     msgs = db.get_unprocessed_messages()
     if not msgs:
         return
-    # regroupe par numéro
+    # Agrupa los mensajes por número de teléfono
     by_phone = {}
     for m in msgs:
         by_phone.setdefault(m["phone"], []).append(m)
 
+    # Índice teléfono -> ubicación del prospecto, para emparejar cada respuesta
     index = _build_prospect_index()
 
     for phone, messages in by_phone.items():
@@ -215,17 +269,18 @@ def process_replies(stats):
         try:
             target = index.get(phone)
             if not target:
-                # réponse d'un numéro inconnu : on marque traité pour ne pas boucler
+                # Respuesta de un número desconocido: se marca como procesada para no repetir
                 db.mark_processed(ids)
                 stats["replies_unmatched"] += 1
                 continue
 
             feuille, row_idx, p = target
+            # Une todos los cuerpos de mensaje y los manda a analizar a la IA
             bodies = [m["body"] for m in messages if m.get("body")]
             analysis = ai_analyzer.analyze_replies(bodies)
             stats["replies_processed"] += 1
 
-            # F/G/H : remplis UNIQUEMENT si la cellule est vide (ne pas écraser le manuel)
+            # F/G/H: se rellenan SOLO si la celda está vacía (no sobrescribir lo manual)
             updates = {}
             if analysis.get("presupuesto") and not sheets.get_cell(feuille, row_idx, "presupuesto").strip():
                 updates["presupuesto"] = analysis["presupuesto"]
@@ -233,14 +288,14 @@ def process_replies(stats):
                 updates["tiempo_busqueda"] = analysis["tiempo_busqueda_texto"]
             if analysis.get("pago_validado") and not sheets.get_cell(feuille, row_idx, "pago_validado").strip():
                 updates["pago_validado"] = analysis["pago_validado"]
-            # K : le prospect a répondu -> relance non nécessaire
+            # K: el prospecto ha respondido -> ya no hace falta relance
             if (sheets.get_cell(feuille, row_idx, "relance_j2").strip() != "No necesaria"):
                 updates["relance_j2"] = "No necesaria"
-            # On ne modifie PAS l'état (col L) ni les états manuels.
+            # NO se modifica el estado (col L) ni los estados manuales.
             if updates:
                 sheets.update_cells(feuille, row_idx, updates)
 
-            # Étape 11 : recherche > 1 an -> message doux spécial
+            # Etapa 11: búsqueda > umbral (1 año) -> mensaje "suave" especial
             meses = analysis.get("tiempo_busqueda_meses", 0)
             if meses and meses > config.LONG_SEARCH_THRESHOLD_MONTHS:
                 if stats.get("dry_run"):
@@ -251,7 +306,7 @@ def process_replies(stats):
                 body = whatsapp.build_long_search(p.get("nombre", ""))
                 ok, info = whatsapp.send_message(phone, body)
                 if ok:
-                    # message doux sans URL d'annonce : on met juste à jour col J
+                    # Mensaje suave sin URL de anuncio: solo se actualiza la col J (último mensaje)
                     sheets.update_cells(feuille, row_idx, {
                         "ultimo_mensaje": _today().isoformat(),
                     })
@@ -262,67 +317,118 @@ def process_replies(stats):
             db.mark_processed(ids)
         except Exception as e:  # noqa: BLE001
             stats["errors"].append(f"Réponse {phone}: {e}")
-            # on ne marque PAS traité pour réessayer au prochain run
+            # NO se marca como procesada para reintentar en el próximo run
 
 
 # ---------------------------------------------------------------------------
-# Étapes 12 à 13 : relances J+2 et clôtures 7 jours
+# Etapas 12 a 13: relances (seguimientos) a J+2 y cierres a los 7 días
 # ---------------------------------------------------------------------------
 def process_relances_and_closures(stats):
+    """
+    Etapas 12 y 13: recorre TODOS los prospectos de TODAS las hojas y, según su
+    estado y la fecha de contacto, reintenta envíos fallidos, manda el seguimiento
+    a J+2 (RELANCE_DELAY_DAYS) o cierra el prospecto en "Sin respuesta - 7d"
+    (NO_REPLY_CLOSE_DAYS) si no ha respondido. Modifica `stats`; no devuelve valor.
+    """
     today = _today()
     for feuille in sheets.list_all_prospect_sheets():
         for row_idx, p in sheets.iter_prospects(feuille):
             try:
                 phone = db.normalize_phone(p.get("telefono", ""))
                 estado = (p.get("estado_final") or "").strip()
-                fecha = _parse_date(p.get("fecha_contacto"))
-                if not phone or not fecha:
+                nombre = p.get("nombre", "")
+                today_s = today.isoformat()
+                if not phone:
                     continue
 
-                # États manuels : ne JAMAIS les toucher
+                # Estados manuales (Visita apuntada/hecha, Fuera): NUNCA se tocan
                 if estado in config.MANUAL_STATES:
                     continue
 
-                relance = (p.get("relance_j2") or "").strip()
+                # --- Reintento de los envíos fallidos (estado "Error envío WA") ---
+                if estado == config.ERROR_WA_STATE:
+                    url = sheets.get_iad_url_for_sheet(feuille)
+                    if not url:
+                        stats["alerts"].append(_url_alert(nombre, phone, feuille))
+                        continue
+                    if stats.get("dry_run"):
+                        print(f"[DRY RUN] whatsapp ignoré pour {phone} (retry Error WA)")
+                        stats["wa_dry_skipped"] += 1
+                        continue
+                    ok, info = whatsapp.send_message(phone, whatsapp.build_first_contact(nombre, url))
+                    if ok:
+                        upd = {"ultimo_mensaje": today_s, "relance_j2": "Pendiente",
+                               "estado_final": "WhatsApp enviado"}
+                        if not (p.get("fecha_contacto") or "").strip():
+                            upd["fecha_contacto"] = today_s
+                        sheets.update_cells(feuille, row_idx, upd)
+                        stats["wa_retry_ok"] += 1
+                        print(f"[pipeline] retry envoi OK {phone} -> WhatsApp enviado")
+                    else:
+                        stats["wa_retry_fail"] += 1
+                        print(f"[pipeline] retry envoi ÉCHEC (#{stats['wa_retry_fail']}) {phone}: {info}")
+                    continue
 
-                # a-t-il répondu ? (au moins un message reçu après le 1er contact)
+                relance = (p.get("relance_j2") or "").strip()
+                fecha = _parse_date(p.get("fecha_contacto"))
+
+                # --- Caso especial: "WhatsApp enviado" pero fecha de contacto VACÍA -> relance ---
+                if estado == "WhatsApp enviado" and not fecha:
+                    url = sheets.get_iad_url_for_sheet(feuille)
+                    if not url:
+                        stats["alerts"].append(_url_alert(nombre, phone, feuille))
+                        continue
+                    if stats.get("dry_run"):
+                        print(f"[DRY RUN] whatsapp ignoré pour {phone} (relance sans fecha)")
+                        stats["wa_dry_skipped"] += 1
+                        continue
+                    ok, info = whatsapp.send_message(phone, whatsapp.build_relance(nombre, url))
+                    if ok:
+                        sheets.update_cells(feuille, row_idx, {
+                            "fecha_contacto": today_s, "ultimo_mensaje": today_s,
+                            "relance_j2": "Enviada", "estado_final": "No responde"})
+                        stats["relances_sent"] += 1
+                        print(f"[pipeline] prospect {nombre or phone} sans fecha contacto -> relance envoyée")
+                    else:
+                        stats["details"].append(f"❌ Relance échouée {phone}: {info}")
+                    continue
+
+                if not fecha:
+                    continue
+
+                # ¿ha respondido? (al menos un mensaje recibido después del 1er contacto)
                 replied = bool(db.get_messages_for_phone(phone, since=_date_to_ts(fecha)))
                 if replied:
-                    # col K : relance non nécessaire
+                    # col K: el seguimiento ya no es necesario
                     if relance != "No necesaria":
                         sheets.update_cells(feuille, row_idx, {"relance_j2": "No necesaria"})
                     continue
 
+                # Días transcurridos desde la fecha de primer contacto
                 days = (today - fecha).days
 
-                # Clôture après 7 jours sans réponse (depuis un état "ouvert")
+                # Cierre tras 7 días sin respuesta (solo desde un estado "abierto")
                 if days >= config.NO_REPLY_CLOSE_DAYS and estado in config.AUTO_CLOSE_FROM \
                         and estado != "Sin respuesta - 7d":
                     sheets.update_cells(feuille, row_idx, {"estado_final": "Sin respuesta - 7d"})
                     stats["closed_7d"] += 1
                     continue
 
-                # Relance J+2 : seulement si col K == "Pendiente" (1er message déjà envoyé)
+                # Relance a J+2: solo si la col K == "Pendiente" (1er mensaje ya enviado)
                 if days >= config.RELANCE_DELAY_DAYS and relance == "Pendiente":
-                    # URL obligatoire : sans URL on n'envoie pas, on alerte.
                     url = sheets.get_iad_url_for_sheet(feuille)
                     if not url:
-                        stats["alerts"].append(
-                            f"[ALERTA] No se pudo enviar WhatsApp a {p.get('nombre') or '?'} "
-                            f"({phone}) — URL manquante pour la feuille {feuille}. "
-                            f"Vérifier l'onglet Config."
-                        )
+                        stats["alerts"].append(_url_alert(nombre, phone, feuille))
                         continue
                     if stats.get("dry_run"):
                         print(f"[DRY RUN] whatsapp ignoré pour {phone} (relance J+2)")
                         stats["wa_dry_skipped"] += 1
                         continue
-                    body = whatsapp.build_relance(p.get("nombre", ""), url)
-                    ok, info = whatsapp.send_message(phone, body)
+                    ok, info = whatsapp.send_message(phone, whatsapp.build_relance(nombre, url))
                     if ok:
                         sheets.update_cells(feuille, row_idx, {
                             "relance_j2": "Enviada",            # col K
-                            "ultimo_mensaje": today.isoformat(),  # col J
+                            "ultimo_mensaje": today_s,            # col J
                             "estado_final": "No responde",        # col L
                         })
                         stats["relances_sent"] += 1
@@ -333,14 +439,16 @@ def process_relances_and_closures(stats):
 
 
 # ---------------------------------------------------------------------------
-# Étape 14 : rapport email
+# Etapa 14: informe por email
 # ---------------------------------------------------------------------------
 def _esc(v):
+    """Escapa un valor para insertarlo de forma segura en HTML. Devuelve la cadena escapada."""
     return _html.escape(str(v if v is not None else ""))
 
 
 def _resolve_bien(ref):
-    """Tente de retrouver (feuille, url IAD) pour une réponse Idealista via la ref."""
+    """Intenta recuperar (hoja, url IAD) para una respuesta de Idealista a partir
+    de la referencia del anuncio. Devuelve (hoja, url) o (None, None) si falla."""
     try:
         feuille, url = sheets.match_lead_to_sheet({"ref": ref, "url": ""})
         return feuille, url
@@ -349,6 +457,8 @@ def _resolve_bien(ref):
 
 
 def _build_text_report(stats, now):
+    """Construye la versión en TEXTO PLANO del informe (resumen de contadores,
+    respuestas Idealista, alertas, errores y leads sin clasificar). Devuelve la cadena."""
     lines = [
         f"Rapport CRM IAD — {now.strftime('%d/%m/%Y %H:%M')}"
         + ("  [DRY RUN]" if stats.get("dry_run") else ""),
@@ -376,6 +486,8 @@ def _build_text_report(stats, now):
 
 
 def _section(title, color, inner):
+    # Envuelve un bloque de contenido HTML en una "tarjeta" con título y color de borde.
+    # Devuelve el HTML de la sección. NO modificar el contenido de la cadena.
     return (
         f'<div style="background:#fff;border-left:4px solid {color};border-radius:4px;'
         f'padding:16px 20px;margin:0 0 18px 0;box-shadow:0 1px 2px rgba(0,0,0,0.06);">'
@@ -385,8 +497,11 @@ def _section(title, color, inner):
 
 
 def _build_html_report(stats, now):
+    # Construye la versión HTML del informe por email (con logo, métricas, secciones
+    # de respuestas Idealista, alertas/errores y leads sin clasificar). Devuelve el HTML.
+    # ATENCIÓN: las plantillas/cadenas HTML de abajo NO deben modificarse.
     A = report_assets
-    # --- Résumé (tableau 2 colonnes) ---
+    # --- Resumen (tabla de 2 columnas) ---
     rows = [
         ("✅ Leads détectés", stats["leads_detected"]),
         ("✅ Nouveaux prospects", stats["prospects_new"]),
@@ -410,7 +525,7 @@ def _build_html_report(stats, now):
 
     parts = [summary]
 
-    # --- Réponses Idealista, groupées par bien ---
+    # --- Respuestas de Idealista, agrupadas por inmueble (bien) ---
     responses = stats.get("idealista_responses", [])
     if responses:
         groups = {}
@@ -435,7 +550,7 @@ def _build_html_report(stats, now):
             )
         parts.append(_section("📬 RÉPONSES IDEALISTA", C_LIGHT, "".join(blocks)))
 
-    # --- Bugs et alertes ---
+    # --- Bugs y alertas ---
     alerts = stats.get("alerts", [])
     errors = stats.get("errors", [])
     if alerts or errors:
@@ -448,7 +563,7 @@ def _build_html_report(stats, now):
         )
         parts.append(_section("🐛 BUGS ET ALERTES", C_ORANGE, items))
 
-    # --- Leads non classifiés ---
+    # --- Leads sin clasificar ---
     unmatched = stats.get("unmatched", [])
     if unmatched:
         items = "".join(
@@ -501,7 +616,8 @@ def _build_html_report(stats, now):
 
 
 def send_report(stats):
-    """Construit et envoie le rapport. Renvoie (ok: bool, message: str)."""
+    """Construye (versión texto + HTML) y envía el informe del run por email vía
+    Gmail. Parámetro `stats`: contadores del run. Devuelve (ok: bool, message: str)."""
     now = datetime.datetime.now()
     text_body = _build_text_report(stats, now)
     subject = "Rapport CRM IAD" + (" [DRY RUN]" if stats.get("dry_run") else "")
@@ -521,9 +637,18 @@ def send_report(stats):
 
 
 # ---------------------------------------------------------------------------
-# Point d'entrée du pipeline
+# Punto de entrada del pipeline
 # ---------------------------------------------------------------------------
 def run(dry_run=False, full_scan=False):
+    """
+    Punto de entrada del pipeline. Inicializa la BD, crea el diccionario `stats`
+    (todos los contadores a 0), ejecuta las etapas en orden (nuevos leads ->
+    respuestas -> relances/cierres), envía el informe y guarda un resumen del run.
+    Parámetros:
+      - dry_run: si True, simula sin enviar WhatsApp reales.
+      - full_scan: si True, escanea los últimos 30 días en lugar de la ventana normal.
+    Devuelve el diccionario `stats` del run.
+    """
     db.init_db()
     started = time.time()
     stats = {
@@ -532,7 +657,7 @@ def run(dry_run=False, full_scan=False):
         "leads_detected": 0, "leads_unmatched": 0,
         "prospects_new": 0, "prospects_updated": 0,
         "wa_first_sent": 0, "wa_failed": 0, "wa_long_search_sent": 0,
-        "wa_dry_skipped": 0,
+        "wa_dry_skipped": 0, "wa_retry_ok": 0, "wa_retry_fail": 0,
         "relances_sent": 0, "closed_7d": 0,
         "replies_processed": 0, "replies_unmatched": 0,
         "details": [], "errors": [], "idealista_responses": [], "alerts": [],

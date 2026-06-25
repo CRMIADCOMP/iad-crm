@@ -1,9 +1,30 @@
 """
-Application Flask principale — tourne 24h/24 sur Railway.
+Aplicación Flask principal del CRM IAD — se ejecuta 24/7 en Railway.
 
-- Sert le webhook UltraMsg (/webhook) pour recevoir les réponses WhatsApp.
-- Lance APScheduler qui exécute le pipeline à 8h, 12h et 18h (heure Madrid).
-- Expose /health (statut) et /run (déclenchement manuel sécurisé du pipeline).
+Responsabilidades de este archivo:
+- App Flask principal: crea la instancia `app`, registra el blueprint del webhook
+  e inicializa la base de datos SQLite al arrancar.
+- Planificador APScheduler: ejecuta el pipeline automáticamente a las 8h, 12h y 18h
+  (hora de Madrid), con una sola instancia garantizada por la guarda `_SCHEDULER_STARTED`.
+- Webhook UltraMsg (`/webhook`, registrado vía blueprint en `webhook.py`): recibe las
+  respuestas entrantes de WhatsApp.
+- Dashboard protegido por contraseña: páginas `/login` y `/dashboard` que muestran el
+  estado del sistema, los resultados del último run y los botones de acción.
+- Endpoints de acción expuestos por la app:
+    /run            -> ejecución manual del pipeline (newer_than:1d)
+    /full_scan      -> escaneo único de los últimos 30 días (newer_than:30d)
+    /reset_timestamp-> reinicia last_run_ts a 0
+    /diag           -> diagnóstico completo (env, Gmail, Sheets)
+    /status         -> resumen del último run
+    /send_report    -> envía por email el informe del último run
+    /test_email     -> envío mínimo de email para aislar problemas
+    /setup_dropdowns-> aplica la validación/lista desplegable "Estado final" en las hojas
+    /add_bien       -> añade un inmueble
+    /close_bien     -> marca un inmueble como vendido/cerrado
+    /list_biens     -> lista los inmuebles activos
+    /login          -> inicio de sesión del dashboard
+    /dashboard      -> panel de control (requiere sesión)
+    /health         -> estado del servicio + próximo/último run
 """
 import os
 import json
@@ -22,28 +43,50 @@ import pipeline
 import report_assets
 from webhook import webhook_bp
 
+# Instancia principal de Flask.
 app = Flask(__name__)
+# Clave secreta para firmar las cookies de sesión. Se toma de SECRET_KEY si existe;
+# en su defecto se deriva de DASHBOARD_PASSWORD para tener un valor estable por despliegue.
 app.secret_key = os.environ.get(
     "SECRET_KEY", "iad-crm-" + os.environ.get("DASHBOARD_PASSWORD", "default")
 )
+# Registra el blueprint del webhook UltraMsg (define la ruta /webhook en webhook.py).
 app.register_blueprint(webhook_bp)
 
+# Crea las tablas de la base de datos SQLite si aún no existen.
 db.init_db()
 
-# Log d'instance : permet de repérer dans les logs Railway si PLUSIEURS instances
-# tournent (chaque instance affichera un pid/hostname différent au démarrage).
+# Log de instancia: permite detectar en los logs de Railway si se están ejecutando
+# VARIAS instancias a la vez (cada instancia imprime un pid/hostname distinto al arrancar).
 print(f"[boot] instance démarrée — pid={os.getpid()} host={socket.gethostname()} "
       f"db={config.DB_PATH}")
 
+# Contraseña del dashboard. Se lee de la variable de entorno DASHBOARD_PASSWORD de Railway;
+# por defecto "iad-crm" si no está definida.
 DASHBOARD_PASSWORD = os.environ.get("DASHBOARD_PASSWORD", "iad-crm")
 
 
 def _is_authed():
+    """Indica si la petición actual tiene sesión de dashboard iniciada.
+
+    Parámetros: ninguno (usa la sesión Flask del contexto actual).
+    Devuelve: True si la clave "auth" de la sesión es exactamente True; False en caso contrario.
+    """
     return session.get("auth") is True
 
 
 def _authorized(req):
-    """Autorise si session dashboard OU token correct OU aucun token configuré."""
+    """Comprueba si una petición está autorizada para ejecutar acciones protegidas.
+
+    Autoriza en cualquiera de estos casos:
+      - hay sesión de dashboard activa (_is_authed),
+      - no hay token RUN_TOKEN configurado en el entorno (acceso abierto),
+      - el parámetro `token` de la query coincide con RUN_TOKEN.
+
+    Parámetros:
+      req -- objeto request de Flask (se lee req.args.get("token")).
+    Devuelve: True si está autorizada; False si no.
+    """
     if _is_authed():
         return True
     token = os.environ.get("RUN_TOKEN")
@@ -53,19 +96,34 @@ def _authorized(req):
 
 
 def _next_run():
+    """Calcula la fecha/hora del próximo run automático del pipeline.
+
+    Parámetros: ninguno (usa config.TIMEZONE y config.RUN_HOURS).
+    Devuelve: un datetime con zona horaria (Madrid) correspondiente a la próxima
+              hora programada (8h/12h/18h). Si ya pasaron todas las horas de hoy,
+              devuelve la primera hora del día siguiente.
+    """
     tz = pytz.timezone(config.TIMEZONE)
     now = datetime.datetime.now(tz)
     hours = sorted(config.RUN_HOURS)
+    # Busca la primera hora programada de hoy que aún sea posterior al momento actual.
     for h in hours:
         c = now.replace(hour=h, minute=0, second=0, microsecond=0)
         if c > now:
             return c
+    # Si ninguna hora de hoy es futura, el próximo run es la primera hora de mañana.
     nxt = now + datetime.timedelta(days=1)
     return nxt.replace(hour=hours[0], minute=0, second=0, microsecond=0)
 
 
 def _run_pipeline_async(dry_run=False, full_scan=False):
-    """Lance le pipeline dans un thread pour ne pas bloquer le scheduler/Flask."""
+    """Ejecuta el pipeline en un hilo aparte para no bloquear al scheduler ni a Flask.
+
+    Parámetros:
+      dry_run   -- si True, simula sin enviar WhatsApp (modo prueba).
+      full_scan -- si True, escanea los últimos 30 días en lugar del día actual.
+    Devuelve: None (el trabajo continúa en un hilo daemon en segundo plano).
+    """
     threading.Thread(
         target=pipeline.run,
         kwargs={"dry_run": dry_run, "full_scan": full_scan},
@@ -74,11 +132,21 @@ def _run_pipeline_async(dry_run=False, full_scan=False):
 
 
 # ---------------------------------------------------------------------------
-# Scheduler (8h, 12h, 18h heure Madrid)
+# Planificador (8h, 12h, 18h hora de Madrid)
 # ---------------------------------------------------------------------------
 def start_scheduler():
+    """Crea y arranca el planificador APScheduler que ejecuta el pipeline.
+
+    Programa un trigger cron en las horas definidas en config.RUN_HOURS (por defecto
+    8, 12 y 18) en la zona horaria config.TIMEZONE (Madrid). misfire_grace_time=3600
+    permite recuperar un run que no se haya disparado a tiempo (hasta 1 hora de margen).
+
+    Parámetros: ninguno.
+    Devuelve: la instancia BackgroundScheduler ya iniciada.
+    """
     tz = pytz.timezone(config.TIMEZONE)
     scheduler = BackgroundScheduler(timezone=tz)
+    # Construye la cadena de horas "8,12,18" que entiende el CronTrigger.
     hours = ",".join(str(h) for h in config.RUN_HOURS)
     scheduler.add_job(
         _run_pipeline_async,
@@ -92,7 +160,9 @@ def start_scheduler():
     return scheduler
 
 
-# Démarre le scheduler une seule fois (gunicorn peut importer le module plusieurs fois).
+# Arranca el planificador una sola vez. Se usa la guarda _SCHEDULER_STARTED porque
+# gunicorn puede importar este módulo varias veces; sin ella se crearían planificadores
+# duplicados y el pipeline se ejecutaría más de una vez por hora. RUN_SCHEDULER=0 lo desactiva.
 if os.environ.get("RUN_SCHEDULER", "1") == "1" and not os.environ.get("_SCHEDULER_STARTED"):
     os.environ["_SCHEDULER_STARTED"] = "1"
     start_scheduler()
@@ -103,11 +173,22 @@ if os.environ.get("RUN_SCHEDULER", "1") == "1" and not os.environ.get("_SCHEDULE
 # ---------------------------------------------------------------------------
 @app.route("/")
 def index():
+    """Endpoint raíz: ping simple del servicio.
+
+    Parámetros: ninguno.
+    Devuelve: JSON con el nombre del servicio, su estado y las horas de ejecución.
+    """
     return jsonify({"service": "iad-crm", "status": "running", "runs": config.RUN_HOURS})
 
 
 @app.route("/health")
 def health():
+    """Estado de salud del servicio.
+
+    Parámetros: ninguno.
+    Devuelve: JSON con el estado, el timestamp y la fecha del último run, la fecha del
+              próximo run automático, la zona horaria y las horas de ejecución.
+    """
     nxt = _next_run()
     last_ts = db.get_last_run_ts()
     last_str = (datetime.datetime.fromtimestamp(last_ts).strftime("%d/%m/%Y %H:%M")
@@ -124,9 +205,15 @@ def health():
 
 @app.route("/run", methods=["POST", "GET"])
 def manual_run():
-    """Déclenchement manuel. Protégé par un token optionnel (RUN_TOKEN)."""
+    """Lanza el pipeline manualmente (ventana normal newer_than:1d).
+
+    Protegido por _authorized (sesión de dashboard o token RUN_TOKEN).
+    Parámetros (query): dry_run=1/true/yes para simular sin enviar WhatsApp.
+    Devuelve: 202 con el estado de arranque, o 401 si no está autorizado.
+    """
     if not _authorized(request):
         return jsonify({"error": "unauthorized"}), 401
+    # Interpreta el parámetro dry_run de la query como booleano.
     dry_run = request.args.get("dry_run", "").lower() in ("1", "true", "yes")
     _run_pipeline_async(dry_run=dry_run)
     return jsonify({"status": "pipeline_started", "dry_run": dry_run,
@@ -135,13 +222,16 @@ def manual_run():
 
 @app.route("/full_scan", methods=["GET", "POST"])
 def full_scan():
-    """
-    Scan unique des 30 derniers jours (newer_than:30d) : traite tous les leads.
-    Après ce run, le fonctionnement normal reprend (newer_than:1d aux runs 8h/12h/18h).
-    Option : ?dry_run=true pour ne pas envoyer de WhatsApp.
+    """Escaneo único de los últimos 30 días (newer_than:30d): procesa todos los leads.
+
+    Tras este run, el funcionamiento normal se reanuda (newer_than:1d en los runs de
+    8h/12h/18h). Protegido por _authorized.
+    Parámetros (query): dry_run=1/true/yes para no enviar WhatsApp.
+    Devuelve: 202 con el estado de arranque, o 401 si no está autorizado.
     """
     if not _authorized(request):
         return jsonify({"error": "unauthorized"}), 401
+    # Interpreta el parámetro dry_run de la query como booleano.
     dry_run = request.args.get("dry_run", "").lower() in ("1", "true", "yes")
     _run_pipeline_async(dry_run=dry_run, full_scan=True)
     return jsonify({"status": "full_scan_started", "dry_run": dry_run,
@@ -151,7 +241,12 @@ def full_scan():
 
 @app.route("/reset_timestamp", methods=["POST"])
 def reset_timestamp():
-    """Remet last_run_ts à 0 : le prochain /run retraitera tous les mails des dernières 24h."""
+    """Reinicia last_run_ts a 0: el próximo /run reprocesará los correos de las últimas 24h.
+
+    Protegido por _authorized.
+    Parámetros: ninguno.
+    Devuelve: 200 con el nuevo valor de last_run_ts, o 401 si no está autorizado.
+    """
     if not _authorized(request):
         return jsonify({"error": "unauthorized"}), 401
     db.set_last_run_ts(0)
@@ -161,7 +256,14 @@ def reset_timestamp():
 
 @app.route("/send_report", methods=["GET", "POST"])
 def send_report_route():
-    """Envoie immédiatement le rapport email du dernier run."""
+    """Envía de inmediato por email el informe del último run.
+
+    Protegido por _authorized. Lee las estadísticas guardadas (last_run_stats) en la
+    base de datos y delega el envío a pipeline.send_report.
+    Parámetros: ninguno.
+    Devuelve: 200/500 con el resultado del envío, 400 si no hay ningún run disponible,
+              o 401 si no está autorizado.
+    """
     if not _authorized(request):
         return jsonify({"error": "unauthorized"}), 401
     raw = db.get_state("last_run_stats")
@@ -178,6 +280,12 @@ def send_report_route():
 
 @app.route("/list_biens")
 def list_biens():
+    """Lista los inmuebles activos leídos de Google Sheets.
+
+    Protegido por _authorized. Refresca la caché de sheets_handler antes de leer.
+    Parámetros: ninguno.
+    Devuelve: JSON {"biens": [...]} con los nombres de inmuebles activos, o 401/500 en error.
+    """
     if not _authorized(request):
         return jsonify({"error": "unauthorized"}), 401
     import sheets_handler
@@ -190,9 +298,16 @@ def list_biens():
 
 @app.route("/add_bien", methods=["POST"])
 def add_bien():
+    """Añade un nuevo inmueble (crea su hoja/entrada en Google Sheets).
+
+    Protegido por _authorized. Acepta los datos como JSON o como formulario.
+    Parámetros (body): nom, description y URLs opcionales (idealista/fotocasa/habitaclia/iad).
+    Devuelve: 200 con un mensaje de éxito, 400 en error de datos, o 401 si no autorizado.
+    """
     if not _authorized(request):
         return jsonify({"error": "unauthorized"}), 401
     import sheets_handler
+    # Acepta tanto cuerpo JSON como datos de formulario.
     data = request.get_json(silent=True) or request.form.to_dict()
     try:
         sheets_handler.reset_cache()
@@ -204,9 +319,16 @@ def add_bien():
 
 @app.route("/close_bien", methods=["POST"])
 def close_bien():
+    """Marca un inmueble como vendido/cerrado en Google Sheets.
+
+    Protegido por _authorized. Acepta los datos como JSON o como formulario.
+    Parámetros (body): nom -- nombre del inmueble a cerrar.
+    Devuelve: 200 con un mensaje de éxito, 400 en error, o 401 si no autorizado.
+    """
     if not _authorized(request):
         return jsonify({"error": "unauthorized"}), 401
     import sheets_handler
+    # Acepta tanto cuerpo JSON como datos de formulario.
     data = request.get_json(silent=True) or request.form.to_dict()
     try:
         sheets_handler.reset_cache()
@@ -218,7 +340,12 @@ def close_bien():
 
 @app.route("/setup_dropdowns", methods=["GET", "POST"])
 def setup_dropdowns():
-    """Applique la liste déroulante Estado final + couleur sur toutes les feuilles."""
+    """Aplica la lista desplegable "Estado final" + color en todas las hojas (1 sola vez).
+
+    Protegido por _authorized.
+    Parámetros: ninguno.
+    Devuelve: 200 con las hojas configuradas, su número y los valores aplicados; 401/500 en error.
+    """
     if not _authorized(request):
         return jsonify({"error": "unauthorized"}), 401
     import sheets_handler
@@ -233,7 +360,12 @@ def setup_dropdowns():
 
 @app.route("/test_email", methods=["GET", "POST"])
 def test_email():
-    """Envoi minimal pour isoler un problème d'envoi email."""
+    """Envío mínimo de email para aislar un problema de envío.
+
+    Protegido por _authorized. Envía un correo de prueba a config.REPORT_EMAIL.
+    Parámetros: ninguno.
+    Devuelve: 200 con el id del mensaje si se envió, 500 en error, o 401 si no autorizado.
+    """
     if not _authorized(request):
         return jsonify({"error": "unauthorized"}), 401
     import gmail_reader
@@ -247,7 +379,12 @@ def test_email():
 
 @app.route("/status")
 def status():
-    """Résumé du dernier run (sans dépendre de l'email)."""
+    """Resumen del último run (sin depender del email).
+
+    Parámetros: ninguno.
+    Devuelve: JSON con el timestamp del último run y las estadísticas guardadas
+              (leads detectados, escritos, no clasificados, errores, etc.).
+    """
     raw = db.get_state("last_run_stats")
     last = json.loads(raw) if raw else None
     return jsonify({"last_run_ts": db.get_last_run_ts(), "last_run": last})
@@ -255,9 +392,12 @@ def status():
 
 @app.route("/diag")
 def diag():
-    """
-    Diagnostic complet : variables d'env, accès Gmail, accès Sheets.
-    À ouvrir dans le navigateur pour voir pourquoi rien ne s'ajoute.
+    """Diagnóstico completo: variables de entorno, acceso a Gmail y acceso a Sheets.
+
+    Pensado para abrirse en el navegador y ver por qué no se añade nada.
+    Parámetros: ninguno.
+    Devuelve: JSON con tres bloques: "env" (presencia de variables), "gmail"
+              (resultado de gmail_reader.diag) y "sheets" (resultado de sheets_handler.diag).
     """
     import gmail_reader
     import sheets_handler
@@ -286,6 +426,7 @@ def diag():
 # ---------------------------------------------------------------------------
 # Dashboard (protégé par mot de passe)
 # ---------------------------------------------------------------------------
+# HTML del logo "iAD REAL ESTATE" que se inserta en las páginas (sustituye __LOGO__). NO modificar su contenido.
 _LOGO_HTML = (
     '<div style="text-align:center;line-height:1;">'
     '<div style="font-family:Arial,sans-serif;font-weight:bold;font-size:42px;'
@@ -294,6 +435,7 @@ _LOGO_HTML = (
     'color:#00b1eb;margin-top:2px;">REAL ESTATE</div></div>'
 )
 
+# HTML/CSS de la página de inicio de sesión del dashboard. NO modificar su contenido (HTML, CSS ni JS).
 LOGIN_HTML = """<!DOCTYPE html><html lang="fr"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1"><title>CRM IAD — Connexion</title>
 <style>
@@ -318,6 +460,7 @@ font-size:15px;font-weight:bold;cursor:pointer;}
   <button type="submit">Se connecter</button>
 </form></body></html>"""
 
+# HTML/CSS/JS de la página del dashboard (panel de control). NO modificar su contenido (HTML, CSS ni JS).
 DASHBOARD_HTML = r"""<!DOCTYPE html><html lang="fr"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1"><title>CRM IAD — Dashboard</title>
 <style>
@@ -563,29 +706,51 @@ setInterval(refreshStatus,10000);
 
 @app.route("/login", methods=["GET", "POST"])
 def login():
+    """Página de inicio de sesión del dashboard.
+
+    En GET muestra el formulario. En POST verifica la contraseña enviada contra
+    DASHBOARD_PASSWORD; si coincide, marca la sesión como autenticada y redirige a /dashboard.
+    Parámetros (body en POST): password -- contraseña introducida.
+    Devuelve: el HTML de login (con mensaje de error si la contraseña es incorrecta) o
+              una redirección a /dashboard si el login es correcto.
+    """
     error = ""
     if request.method == "POST":
         print(f"[login] tentative mot de passe, DASHBOARD_PASSWORD défini: "
               f"{bool(os.environ.get('DASHBOARD_PASSWORD'))}")
-        # .strip() : évite les échecs dus à un espace/retour-ligne dans la variable Railway
+        # .strip(): evita fallos por un espacio o salto de línea en la variable de Railway.
+        # Se compara la contraseña del formulario con DASHBOARD_PASSWORD ya saneada.
         if (request.form.get("password") or "").strip() == (DASHBOARD_PASSWORD or "").strip():
             session["auth"] = True
             return redirect("/dashboard")
         error = '<div class="err">Mot de passe incorrect</div>'
+    # Construye la página inyectando el logo y el posible error en la plantilla mediante .replace.
     html = LOGIN_HTML.replace("__LOGO__", _LOGO_HTML).replace("__ERROR__", error)
     return html
 
 
 @app.route("/logout")
 def logout():
+    """Cierra la sesión del dashboard.
+
+    Parámetros: ninguno.
+    Devuelve: una redirección a /login tras vaciar la sesión.
+    """
     session.clear()
     return redirect("/login")
 
 
 @app.route("/dashboard")
 def dashboard():
+    """Panel de control (requiere sesión iniciada).
+
+    Si no hay sesión, redirige a /login. Si la hay, devuelve el HTML del dashboard.
+    Parámetros: ninguno.
+    Devuelve: el HTML del dashboard o una redirección a /login.
+    """
     if not _is_authed():
         return redirect("/login")
+    # Inyecta el logo y la URL del Google Sheet en la plantilla mediante .replace.
     html = (DASHBOARD_HTML
             .replace("__LOGO__", _LOGO_HTML)
             .replace("__SHEET_URL__", report_assets.GOOGLE_SHEET_URL))
@@ -593,7 +758,8 @@ def dashboard():
 
 
 if __name__ == "__main__":
-    # Exécution locale (dev). En prod, gunicorn sert app:app.
+    # Ejecución local (desarrollo). En producción, gunicorn sirve app:app.
+    # Arranca el planificador aquí si aún no se inició (misma guarda _SCHEDULER_STARTED).
     if not os.environ.get("_SCHEDULER_STARTED"):
         os.environ["_SCHEDULER_STARTED"] = "1"
         start_scheduler()
