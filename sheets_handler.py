@@ -899,15 +899,35 @@ def _rgb(hexs):
             "blue": int(hexs[4:6], 16) / 255}
 
 
-def _cell(value, bg_hex, white=True, size=None, is_formula=True):
-    """Construye un dict de celda (valor + formato) para updateCells."""
-    uev = {"formulaValue": value} if is_formula else {"stringValue": value}
-    tf = {"bold": True, "foregroundColor": _rgb("FFFFFF" if white else "000000")}
+def _cell(text, bg_hex, white=True, size=None, link=None):
+    """Construye un dict de celda (texto + formato) para updateCells.
+
+    Si se pasa `link`, el hipervínculo se aplica mediante textFormatRuns.link.uri
+    (NO con la fórmula HYPERLINK, que da #ERROR! en celdas fusionadas).
+    """
+    fg = _rgb("FFFFFF" if white else "000000")
+    tf = {"bold": True, "foregroundColor": fg}
     if size:
         tf["fontSize"] = size
-    return {"userEnteredValue": uev,
-            "userEnteredFormat": {"backgroundColor": _rgb(bg_hex),
-                                  "textFormat": tf, "horizontalAlignment": "CENTER"}}
+    cell = {
+        "userEnteredValue": {"stringValue": text},
+        "userEnteredFormat": {"backgroundColor": _rgb(bg_hex),
+                              "textFormat": tf, "horizontalAlignment": "CENTER",
+                              "verticalAlignment": "MIDDLE"},
+    }
+    if link:
+        # El enlace se define como un "run" de formato sobre todo el texto.
+        run_fmt = {"link": {"uri": link}, "bold": True, "foregroundColor": fg, "underline": False}
+        cell["textFormatRuns"] = [{"startIndex": 0, "format": run_fmt}]
+    return cell
+
+
+def _update_cell_req(gid, col_index, cell):
+    """Genera un request updateCells para una sola celda (fila 1)."""
+    return {"updateCells": {
+        "rows": [{"values": [cell]}],
+        "fields": "userEnteredValue,userEnteredFormat,textFormatRuns",
+        "start": {"sheetId": gid, "rowIndex": 0, "columnIndex": col_index}}}
 
 
 def _layout_requests(gid, menu_gid, url_idea, url_foto, ref_idea):
@@ -921,32 +941,21 @@ def _layout_requests(gid, menu_gid, url_idea, url_foto, ref_idea):
         "sheetId": gid, "startRowIndex": 0, "endRowIndex": 1, "startColumnIndex": 0, "endColumnIndex": 5}}})
     reqs.append({"mergeCells": {"mergeType": "MERGE_ALL", "range": {
         "sheetId": gid, "startRowIndex": 0, "endRowIndex": 1, "startColumnIndex": 5, "endColumnIndex": 12}}})
-    # 2) A1:E1 -> "Volver al Menú" con hyperlink interno (#gid=...) fondo azul oscuro.
-    menu_formula = (f'=HYPERLINK("#gid={menu_gid}","🏠 Volver al Menú")'
-                    if menu_gid is not None else "🏠 Volver al Menú")
-    reqs.append({"updateCells": {
-        "rows": [{"values": [_cell(menu_formula, "1F4E78", white=True,
-                                   is_formula=menu_gid is not None)]}],
-        "fields": "userEnteredValue,userEnteredFormat",
-        "start": {"sheetId": gid, "rowIndex": 0, "columnIndex": 0}}})
+    # 2) A1:E1 -> "Volver al Menú" con enlace interno (#gid=...) vía textFormatRuns.
+    menu_link = f"#gid={menu_gid}" if menu_gid is not None else None
+    reqs.append(_update_cell_req(gid, 0, _cell("🏠 Volver al Menú", "1F4E78", white=True, link=menu_link)))
     # 3) F1:L1 -> "Ver anuncio". Prioridad Idealista, luego Fotocasa; si no, gris sin enlace.
     if url_idea:
-        anuncio = _cell(f'=HYPERLINK("{url_idea}","🔗 Ver anuncio en Idealista")', "00B1EB", white=True)
+        anuncio = _cell("🔗 Ver anuncio en Idealista", "00B1EB", white=True, link=url_idea)
     elif url_foto:
-        anuncio = _cell(f'=HYPERLINK("{url_foto}","🔗 Ver anuncio en Fotocasa")', "00B1EB", white=True)
+        anuncio = _cell("🔗 Ver anuncio en Fotocasa", "00B1EB", white=True, link=url_foto)
     else:
-        anuncio = _cell("🔗 Ver anuncio", "CCCCCC", white=False, is_formula=False)
-    reqs.append({"updateCells": {
-        "rows": [{"values": [anuncio]}],
-        "fields": "userEnteredValue,userEnteredFormat",
-        "start": {"sheetId": gid, "rowIndex": 0, "columnIndex": 5}}})
-    # 4) N1 -> "Ref. Idealista: XXXX" fondo azul claro, texto blanco, tamaño 9.
+        anuncio = _cell("🔗 Ver anuncio", "CCCCCC", white=False)
+    reqs.append(_update_cell_req(gid, 5, anuncio))
+    # 4) N1 -> "Ref. Idealista: XXXX" fondo azul claro, texto blanco, tamaño 9 (sin enlace).
     if ref_idea:
-        reqs.append({"updateCells": {
-            "rows": [{"values": [_cell(f"Ref. Idealista: {ref_idea}", "00B1EB",
-                                       white=True, size=9, is_formula=False)]}],
-            "fields": "userEnteredValue,userEnteredFormat",
-            "start": {"sheetId": gid, "rowIndex": 0, "columnIndex": 13}}})  # col N
+        reqs.append(_update_cell_req(gid, 13, _cell(f"Ref. Idealista: {ref_idea}", "00B1EB",
+                                                    white=True, size=9)))
     return reqs
 
 
