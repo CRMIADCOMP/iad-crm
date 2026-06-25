@@ -997,6 +997,69 @@ def sync_sheets(stats):
             print(f"[sync] échec mise en page '{t}': {e}")
 
 
+def sync_all_sheets():
+    """Sincroniza la navegación (fila 1) y la descripción (col B Config) en TODAS las hojas.
+
+    Para cada hoja de inmueble (ignora Menú, Config, Leads sin clasificar, Hoja ejemplo):
+      - reescribe la cabecera de navegación de la fila 1 (A1:E1 Menú / F1:L1 Ver anuncio),
+      - actualiza la col B de Config con el título de la fila 2 si difiere.
+    Devuelve un resumen: {status, sheets_updated, navigation_updated, config_updated}.
+    """
+    ss = _get_spreadsheet()
+    cc = config.CONFIG_COL
+    ignore = {"menú", "menu", "leads sin clasificar", "hoja ejemplo"}
+    menu_gid = next((w.id for w in _all_worksheets()
+                     if w.title.strip().lower() in ("menú", "menu")), None)
+    config_ws = _get_config_worksheet()
+    cfg_values = config_ws.get_all_values()
+    cfg_index = {}
+    for i, row in enumerate(cfg_values[1:], start=2):
+        name = (row[cc["feuille"]] if cc["feuille"] < len(row) else "").strip()
+        if name:
+            cfg_index[name.lower()] = (i, row)
+
+    sheets_updated = navigation_updated = config_updated = 0
+    for ws in _all_worksheets():
+        t = ws.title
+        tl = t.strip().lower()
+        if tl in ignore or "config" in tl:
+            continue
+        try:
+            entry = cfg_index.get(tl)
+            cfg_row = entry[1] if entry else []
+
+            def g(idx):
+                return (cfg_row[idx] if idx < len(cfg_row) else "").strip()
+
+            touched = False
+            # 1) Sincroniza col B (descripción) con la fila 2 (A2) de la hoja.
+            vals = _values_for(ws)
+            title2 = (vals[1][0] if len(vals) > 1 and vals[1] else "").strip()
+            if entry and title2 and title2 != g(cc["description"]):
+                _write_throttle()
+                config_ws.update_cell(entry[0], cc["description"] + 1, title2)
+                config_updated += 1
+                touched = True
+                print(f"[sync] {t} → Config col B mis à jour : \"{title2}\"")
+
+            # 2) Cabecera de navegación (fila 1) + ref N1.
+            reqs = _layout_requests(ws.id, menu_gid,
+                                    g(cc["url_idealista"]), g(cc["url_fotocasa"]), g(cc["ref_idealista"]))
+            _write_throttle()
+            ss.batch_update({"requests": reqs})
+            navigation_updated += 1
+            touched = True
+            print(f"[sync] {t} → navigation mise à jour")
+
+            if touched:
+                sheets_updated += 1
+        except Exception as e:  # noqa: BLE001
+            print(f"[sync] échec '{t}': {e}")
+
+    return {"status": "ok", "sheets_updated": sheets_updated,
+            "navigation_updated": navigation_updated, "config_updated": config_updated}
+
+
 def _price_to_num(p):
     """Convierte un precio abreviado ('55k', '12 500') en su valor numérico en texto."""
     p = (p or "").strip().lower()

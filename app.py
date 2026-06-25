@@ -352,6 +352,19 @@ def update_config():
                     "iad_profile_url": db.get_iad_profile_url()})
 
 
+@app.route("/sync_all_sheets", methods=["GET", "POST"])
+def sync_all_sheets():
+    """Reescribe la navegación (fila 1) y sincroniza la col B de Config en todas las hojas."""
+    if not _authorized(request):
+        return jsonify({"error": "unauthorized"}), 401
+    import sheets_handler
+    try:
+        sheets_handler.reset_cache()
+        return jsonify(sheets_handler.sync_all_sheets()), 200
+    except Exception as e:  # noqa: BLE001
+        return jsonify({"status": "error", "message": str(e)}), 500
+
+
 @app.route("/sync_iad_urls", methods=["GET", "POST"])
 def sync_iad_urls():
     """Scrapea el perfil IAD y sincroniza URLs/datos en la pestaña Config."""
@@ -639,6 +652,7 @@ text-decoration:none;padding:11px 18px;border-radius:8px;font-weight:bold;font-s
     <button class="btn" onclick="openModal('addModal')">➕ Añadir un nuevo inmueble</button>
     <button class="btn orange" onclick="openModal('closeModal')">🏁 Marcar inmueble como vendido</button>
     <button class="btn light" onclick="act('POST','/sync_iad_urls','Sincronizar URLs IAD')">🔄 Sincronizar URLs IAD</button>
+    <button class="btn light" onclick="act('POST','/sync_all_sheets','Sincronizar todas las hojas')">🔄 Sincronizar todas las hojas</button>
   </div>
 </div>
 
